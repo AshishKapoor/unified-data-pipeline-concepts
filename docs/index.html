@@ -17,134 +17,148 @@
   </header>
 
   <section class="hero">
+    <span class="eyebrow"><span class="ping"></span> Apache Beam 2.74 · Apache Flink 1.19 · runs on a real cluster</span>
     <h1>The unified data pipeline, from first principles</h1>
     <p class="lede">
-      Learn Apache Beam's unified batch + stream model by running real Python pipelines on a real
-      Apache Flink cluster — orchestrated by a NestJS control plane, with an interactive diagram and a
-      one-click <strong>Run on Flink</strong> button in every chapter.
+      Learn Apache Beam's unified batch&nbsp;+&nbsp;stream model by running real Python pipelines on a
+      real Apache Flink cluster — orchestrated by a NestJS control plane, with an interactive diagram
+      and a one-click <strong>Run&nbsp;on&nbsp;Flink</strong> button in every chapter.
     </p>
-    <div class="equation">Beam = Batch + strEAM&nbsp;&nbsp;·&nbsp;&nbsp;one pipeline → many runners</div>
+    <div class="equation"><b>Beam = Batch + strEAM</b> &nbsp;·&nbsp; one pipeline → many runners</div>
+
+    <!-- decorative animated dataflow: bytes streaming through a pipeline -->
+    <svg class="hero-flow" viewBox="0 0 720 92" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="hf" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#ff6a1a" /><stop offset=".55" stop-color="#e6336b" /><stop offset="1" stop-color="#8b5cf6" />
+        </linearGradient>
+      </defs>
+      <path id="flowpath" d="M20 46 H700" stroke="url(#hf)" stroke-width="3" stroke-linecap="round" opacity=".35" />
+      <!-- stage nodes -->
+      <g font-family="Inter, system-ui" font-size="11" font-weight="700" text-anchor="middle">
+        <g><circle cx="70" cy="46" r="26" fill="var(--surface)" stroke="#ff6a1a" stroke-width="2.5"/><text x="70" y="50" fill="var(--text)">Source</text></g>
+        <g><circle cx="270" cy="46" r="26" fill="var(--surface)" stroke="#5b7cfa" stroke-width="2.5"/><text x="270" y="50" fill="var(--text)">Window</text></g>
+        <g><circle cx="470" cy="46" r="26" fill="var(--surface)" stroke="#11b5a4" stroke-width="2.5"/><text x="470" y="50" fill="var(--text)">Combine</text></g>
+        <g><circle cx="660" cy="46" r="26" fill="var(--surface)" stroke="#e6336b" stroke-width="2.5"/><text x="660" y="50" fill="var(--text)">Sink</text></g>
+      </g>
+      <!-- flowing bytes -->
+      <g fill="url(#hf)">
+        <circle r="5"><animateMotion dur="3.2s" repeatCount="indefinite" path="M20 46 H700"/></circle>
+        <circle r="5"><animateMotion dur="3.2s" begin="0.8s" repeatCount="indefinite" path="M20 46 H700"/></circle>
+        <circle r="5"><animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite" path="M20 46 H700"/></circle>
+        <circle r="5"><animateMotion dur="3.2s" begin="2.4s" repeatCount="indefinite" path="M20 46 H700"/></circle>
+      </g>
+    </svg>
+
+    <div class="hero-cta">
+      <a class="btn-primary" href="/docs/chapters/ch01.html">Start the course →</a>
+      <a class="btn-ghost" href="/docs/api" target="_blank" rel="noopener">Explore the API</a>
+    </div>
   </section>
 
   <div class="parts">
 
     <h2 class="part-title">Part I · The Unified Model &amp; Core Abstractions</h2>
-    <div class="grid">
-      <a class="card" href="/docs/chapters/ch01.html">
-        <span class="num">CH 01</span>
-        <h3>The Unified Model: Why Beam Exists</h3>
+    <div class="grid" data-part="1">
+      <a class="card" href="/docs/chapters/ch01.html" data-glyph="🔀">
+        <span class="num">CH 01</span><h3>The Unified Model: Why Beam Exists</h3>
         <p>One pipeline definition, many runners. Batch is a bounded special case of streaming.</p>
         <div class="apis"><span class="tag">Pipeline</span><span class="tag">Create</span><span class="tag">Map</span><span class="tag">--runner</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch02.html">
-        <span class="num">CH 02</span>
-        <h3>Core Abstractions</h3>
+      <a class="card" href="/docs/chapters/ch02.html" data-glyph="🧩">
+        <span class="num">CH 02</span><h3>Core Abstractions</h3>
         <p>Pipeline, PCollection, PTransform, PValue — and the anatomy of a single element.</p>
-        <div class="apis"><span class="tag">PCollection</span><span class="tag">PTransform.expand</span><span class="tag">coders</span></div>
+        <div class="apis"><span class="tag">PCollection</span><span class="tag">PTransform</span><span class="tag">coders</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch03.html">
-        <span class="num">CH 03</span>
-        <h3>Element-wise Transforms &amp; the DoFn Lifecycle</h3>
+      <a class="card" href="/docs/chapters/ch03.html" data-glyph="⚙️">
+        <span class="num">CH 03</span><h3>Element-wise Transforms &amp; the DoFn Lifecycle</h3>
         <p>Map/FlatMap/Filter/ParDo and setup → start_bundle → process → finish_bundle → teardown.</p>
         <div class="apis"><span class="tag">ParDo</span><span class="tag">DoFn</span><span class="tag">bundles</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch04.html">
-        <span class="num">CH 04</span>
-        <h3>Running on Flink for Real</h3>
+      <a class="card" href="/docs/chapters/ch04.html" data-glyph="🛰️">
+        <span class="num">CH 04</span><h3>Running on Flink for Real</h3>
         <p>The portable runner: Job Server, the Fn API, the SDK harness, and environment types.</p>
         <div class="apis"><span class="tag">PortableRunner</span><span class="tag">Fn API</span><span class="tag">EXTERNAL</span></div>
       </a>
     </div>
 
     <h2 class="part-title">Part II · Transforms &amp; Aggregation</h2>
-    <div class="grid">
-      <a class="card" href="/docs/chapters/ch05.html">
-        <span class="num">CH 05</span>
-        <h3>Keyed Aggregation</h3>
+    <div class="grid" data-part="2">
+      <a class="card" href="/docs/chapters/ch05.html" data-glyph="🔗">
+        <span class="num">CH 05</span><h3>Keyed Aggregation</h3>
         <p>GroupByKey, CoGroupByKey, Flatten — the shuffle and relational joins.</p>
         <div class="apis"><span class="tag">GroupByKey</span><span class="tag">CoGroupByKey</span><span class="tag">Flatten</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch06.html">
-        <span class="num">CH 06</span>
-        <h3>Efficient Aggregation: Combine</h3>
+      <a class="card" href="/docs/chapters/ch06.html" data-glyph="➕">
+        <span class="num">CH 06</span><h3>Efficient Aggregation: Combine</h3>
         <p>Why Combine beats GroupByKey+reduce — partial aggregation via combiner lifting.</p>
         <div class="apis"><span class="tag">CombinePerKey</span><span class="tag">CombineFn</span><span class="tag">Mean</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch07.html">
-        <span class="num">CH 07</span>
-        <h3>Routing Data</h3>
+      <a class="card" href="/docs/chapters/ch07.html" data-glyph="🚦">
+        <span class="num">CH 07</span><h3>Routing Data</h3>
         <p>Partition, broadcast side inputs, and the dead-letter pattern via tagged outputs.</p>
         <div class="apis"><span class="tag">Partition</span><span class="tag">AsDict</span><span class="tag">with_outputs</span></div>
       </a>
     </div>
 
     <h2 class="part-title">Part III · Time, Windowing &amp; the Streaming Heart</h2>
-    <div class="grid">
-      <a class="card" href="/docs/chapters/ch08.html">
-        <span class="num">CH 08</span>
-        <h3>The Streaming Mindset</h3>
+    <div class="grid" data-part="3">
+      <a class="card" href="/docs/chapters/ch08.html" data-glyph="⏱️">
+        <span class="num">CH 08</span><h3>The Streaming Mindset</h3>
         <p>Event time vs processing time and the four questions: WHAT / WHERE / WHEN / HOW.</p>
         <div class="apis"><span class="tag">TimestampedValue</span><span class="tag">event time</span></div>
         <div class="badges"><span class="pill stream">streaming</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch09.html">
-        <span class="num">CH 09</span>
-        <h3>Windowing</h3>
+      <a class="card" href="/docs/chapters/ch09.html" data-glyph="🪟">
+        <span class="num">CH 09</span><h3>Windowing</h3>
         <p>Fixed, sliding, merging sessions, and the global window.</p>
         <div class="apis"><span class="tag">FixedWindows</span><span class="tag">Sessions</span><span class="tag">WindowInto</span></div>
         <div class="badges"><span class="pill stream">streaming</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch10.html">
-        <span class="num">CH 10</span>
-        <h3>Watermarks</h3>
+      <a class="card" href="/docs/chapters/ch10.html" data-glyph="🌊">
+        <span class="num">CH 10</span><h3>Watermarks</h3>
         <p>"No more data with event time ≤ T": min-across-inputs propagation and idleness.</p>
         <div class="apis"><span class="tag">watermark</span><span class="tag">idleness</span></div>
         <div class="badges"><span class="pill stream">streaming</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch11.html">
-        <span class="num">CH 11</span>
-        <h3>Triggers &amp; Accumulation</h3>
+      <a class="card" href="/docs/chapters/ch11.html" data-glyph="⏲️">
+        <span class="num">CH 11</span><h3>Triggers &amp; Accumulation</h3>
         <p>Early / on-time / late firings, and accumulating vs discarding panes.</p>
-        <div class="apis"><span class="tag">AfterWatermark</span><span class="tag">AfterCount</span><span class="tag">accumulation_mode</span></div>
+        <div class="apis"><span class="tag">AfterWatermark</span><span class="tag">AfterCount</span><span class="tag">accumulation</span></div>
         <div class="badges"><span class="pill stream">streaming</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch12.html">
-        <span class="num">CH 12</span>
-        <h3>Late Data &amp; Allowed Lateness</h3>
+      <a class="card" href="/docs/chapters/ch12.html" data-glyph="🐢">
+        <span class="num">CH 12</span><h3>Late Data &amp; Allowed Lateness</h3>
         <p>The late-element lifecycle, window state GC, and measuring dropped data.</p>
-        <div class="apis"><span class="tag">allowed_lateness</span><span class="tag">PaneInfoParam</span><span class="tag">metrics</span></div>
+        <div class="apis"><span class="tag">allowed_lateness</span><span class="tag">PaneInfo</span><span class="tag">metrics</span></div>
         <div class="badges"><span class="pill stream">streaming</span></div>
       </a>
     </div>
 
     <h2 class="part-title">Part IV · Stateful Processing, IO &amp; the Flink Runtime</h2>
-    <div class="grid">
-      <a class="card" href="/docs/chapters/ch13.html">
-        <span class="num">CH 13</span>
-        <h3>Stateful Processing: State &amp; Timers</h3>
+    <div class="grid" data-part="4">
+      <a class="card" href="/docs/chapters/ch13.html" data-glyph="🧠">
+        <span class="num">CH 13</span><h3>Stateful Processing: State &amp; Timers</h3>
         <p>Per-key-per-window state cells and event/processing-time timers with @on_timer.</p>
-        <div class="apis"><span class="tag">BagStateSpec</span><span class="tag">TimerSpec</span><span class="tag">@on_timer</span></div>
+        <div class="apis"><span class="tag">BagState</span><span class="tag">TimerSpec</span><span class="tag">@on_timer</span></div>
         <div class="badges"><span class="pill stream">streaming</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch14.html">
-        <span class="num">CH 14</span>
-        <h3>Splittable DoFn (SDF)</h3>
+      <a class="card" href="/docs/chapters/ch14.html" data-glyph="✂️">
+        <span class="num">CH 14</span><h3>Splittable DoFn (SDF)</h3>
         <p>Dynamic splitting and mid-element checkpointing via restriction trackers.</p>
-        <div class="apis"><span class="tag">RestrictionProvider</span><span class="tag">OffsetRangeTracker</span><span class="tag">try_claim</span></div>
+        <div class="apis"><span class="tag">RestrictionProvider</span><span class="tag">try_claim</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch15.html">
-        <span class="num">CH 15</span>
-        <h3>IO &amp; Cross-Language: KafkaIO</h3>
+      <a class="card" href="/docs/chapters/ch15.html" data-glyph="📡">
+        <span class="num">CH 15</span><h3>IO &amp; Cross-Language: KafkaIO</h3>
         <p>TextIO vs KafkaIO, and the expansion service that lets Python use Java KafkaIO.</p>
         <div class="apis"><span class="tag">ReadFromKafka</span><span class="tag">expansion service</span></div>
-        <div class="badges"><span class="pill kafka">needs kafka</span><span class="pill stream">streaming</span></div>
+        <div class="badges"><span class="pill kafka">kafka</span><span class="pill stream">streaming</span></div>
       </a>
-      <a class="card" href="/docs/chapters/ch16.html">
-        <span class="num">CH 16</span>
-        <h3>Exactly-Once &amp; the Flink Runtime</h3>
+      <a class="card" href="/docs/chapters/ch16.html" data-glyph="🛡️">
+        <span class="num">CH 16</span><h3>Exactly-Once &amp; the Flink Runtime</h3>
         <p>Checkpointing (ABS / Chandy-Lamport), savepoints, rescaling, backpressure, recovery.</p>
         <div class="apis"><span class="tag">checkpointing</span><span class="tag">savepoints</span><span class="tag">backpressure</span></div>
-        <div class="badges"><span class="pill kafka">needs kafka</span><span class="pill stream">streaming</span></div>
+        <div class="badges"><span class="pill kafka">kafka</span><span class="pill stream">streaming</span></div>
       </a>
     </div>
 
@@ -153,5 +167,6 @@
   <footer class="site-footer">
     unified-data-pipeline-concepts · Apache Beam 2.74 on Apache Flink 1.19 · teaching material (MIT)
   </footer>
+  <script src="/docs/assets/js/site.js"></script>
 </body>
 </html>
