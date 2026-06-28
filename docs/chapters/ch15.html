@@ -90,13 +90,20 @@
       <div class="callout warn">
         <span class="ic">⚠️</span>
         <div>
-          <strong>This chapter requires Kafka.</strong> Before running, bring up the broker overlay and
-          seed the topics:
-          <pre><code class="language-bash">./scripts/up-kafka.sh      # start the Kafka broker
-./scripts/seed-kafka.sh    # create clicks-in / counts-out, produce sample clicks</code></pre>
-          <strong>Brokers must be reached at <code>kafka:29092</code></strong> (the in-network
-          listener), <em>not</em> <code>localhost:9092</code>. The SDK harnesses run <em>inside</em>
-          the cluster network; <code>localhost:9092</code> only works from your laptop.
+          <strong>What "Run on Flink" actually runs here.</strong> Running the <em>Java</em> KafkaIO
+          harness on a portable Flink cluster needs a <strong>Java SDK worker pool</strong> (the Java
+          analogue of this project's Python pool) — genuinely involved infra on a Flink EXTERNAL-worker
+          setup. So by default the Run button runs a <strong>pure-Python streaming demo</strong> (an
+          unbounded synthetic click stream, windowed and counted per user) that has the <em>same
+          streaming + windowed-aggregation shape</em> and runs flawlessly out of the box.
+          <br /><br />
+          The <strong>real cross-language KafkaIO code</strong> is exactly what you see above
+          (<code>build_kafka_pipeline</code>) — that <em>is</em> the lesson. To execute it:
+          <pre><code class="language-bash">./scripts/up-kafka.sh && ./scripts/seed-kafka.sh   # broker + topics
+# provide a Java SDK worker pool at $BEAM_JAVA_WORKER_POOL (advanced — see README), then:
+ENABLE_XLANG_KAFKA=1 ./scripts/submit.sh ch15</code></pre>
+          <strong>Brokers must be reached at <code>kafka:29092</code></strong> (in-network), <em>not</em>
+          <code>localhost:9092</code> — SDK harnesses run inside the cluster network.
         </div>
       </div>
 

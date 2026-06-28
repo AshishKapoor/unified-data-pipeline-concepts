@@ -117,9 +117,13 @@ flink run -s s3://bucket/savepoints/savepoint-xxxx -p 4 job.jar   # restore at p
       <div class="callout warn">
         <span class="ic">🟧</span>
         <div>
-          <strong>This chapter needs Kafka.</strong> Bring up the Kafka overlay and seed the topics
-          first: run <code>./scripts/up-kafka.sh</code> then <code>./scripts/seed-kafka.sh</code>.
-          The pipeline reads <code>clicks-in</code> and writes counts to <code>counts-out</code>.
+          <strong>What "Run on Flink" runs here.</strong> By default this runs a <strong>pure-Python
+          streaming demo</strong> so checkpointing and recovery are observable out of the box — open the
+          Flink UI ▸ <em>Checkpoints</em> tab to watch them complete every ~10s, then
+          <code>docker compose kill taskmanager</code> mid-run to see rollback-and-replay. A truly
+          replayable end-to-end-exactly-once source is <strong>Kafka</strong>; that real KafkaIO path is
+          shown below and (like Ch&nbsp;15) needs a Java SDK worker pool — enable with
+          <code>ENABLE_XLANG_KAFKA=1</code> after <code>./scripts/up-kafka.sh && ./scripts/seed-kafka.sh</code>.
         </div>
       </div>
 

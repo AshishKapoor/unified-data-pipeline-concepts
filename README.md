@@ -39,8 +39,14 @@ A **hands-on teaching course** for the unified batch + stream processing model, 
 ## Prerequisites
 
 - Docker + Docker Compose v2/v5 (the whole cluster runs in containers).
-- ~6 GB free RAM for the Flink + Beam + (optional) Kafka stack.
+- **~8 GB free RAM** for Docker (the TaskManager alone is sized at 5 GB so streaming jobs don't OOM).
 - That's it — you do **not** need Python, Node, or a JDK installed locally; everything is containerized.
+
+### Port conflicts? (optional)
+
+The stack publishes `8081` (Flink UI), `3000` (docs/API), and `9092` (Kafka). If any are taken on
+your machine, copy [`docker/.env.example`](docker/.env.example) to `docker/.env` and set
+`FLINK_UI_PORT` / `API_PORT` / `KAFKA_PORT` to free ports — compose and the `scripts/` auto-load it.
 
 ## Quick start
 
@@ -106,10 +112,24 @@ Python `3.11`**, and the **Flink cluster minor (`1.19`) must equal the job-serve
 Version skew here is the #1 cause of cryptic coder/proto/gRPC errors. All image tags are pinned in
 [`docker/docker-compose.yml`](docker/docker-compose.yml); see [`BUILD_BRIEF.md`](BUILD_BRIEF.md) §1.
 
+## Verified
+
+All 16 chapter pipelines have been run end-to-end on the real Dockerized Flink cluster
+(`STOPPED → RUNNING → DONE`), and the full control-plane flow was exercised live:
+`POST /api/pipelines/:concept/run` → SSE log stream → Flink job correlation → `SUCCEEDED`. The
+`up.sh` → `submit.sh` → `down.sh` lifecycle starts, configures, and tears down with **zero leaked
+containers, volumes, or networks**.
+
 ## Status / honesty notes
 
 This is a **learning environment**, not production infrastructure:
 - The run registry is in-memory (`ReplaySubject`) — runs are lost on API restart.
+- **Chapters 15 & 16 (cross-language KafkaIO):** the *Java* KafkaIO harness needs a Java SDK worker
+  pool, which is genuinely involved on a Flink EXTERNAL-worker cluster (the stock Java SDK image does
+  not expose the simple `--worker_pool` mode the Python image does). So by default these chapters run
+  a **pure-Python streaming demo** with the same windowed-aggregation shape (and, for Ch 16, live
+  checkpointing/recovery you can watch). The **real KafkaIO cross-language code is present and taught**;
+  enable it with `ENABLE_XLANG_KAFKA=1` once you provide a Java worker pool (see the chapter pages).
 - Some advanced Beam features are less mature in Python-on-Flink; chapters flag these explicitly
   (Ch 13 sticks to Value/Bag/Combining state; Ch 14 teaches a bounded toy SDF; Ch 16 separates
   exactly-once *state* from end-to-end sink exactly-once).
