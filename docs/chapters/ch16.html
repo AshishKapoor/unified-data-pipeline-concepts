@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 16 — Exactly-Once, Fault Tolerance &amp; the Flink Runtime · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch16">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch15.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 16 — Exactly-Once, Fault Tolerance &amp; the Flink Runtime</h1>
+      <p class="concept-summary">
+        Barriers flow inline with your records, align at multi-input operators, and trigger a
+        consistent snapshot — that is how Flink gives you <strong>exactly-once state</strong>. Getting
+        exactly-once <em>output</em> is a separate problem solved by transactional sinks.
+      </p>
+
+      <h2>Concept — Asynchronous Barrier Snapshotting</h2>
+      <p>
+        Flink's fault-tolerance is built on <strong>Asynchronous Barrier Snapshotting</strong> (ABS),
+        a streaming variant of the classic <strong>Chandy–Lamport</strong> distributed-snapshot
+        algorithm. The JobManager's <em>checkpoint coordinator</em> periodically injects a numbered
+        <strong>barrier</strong> into every source. The barrier is not a side channel — it travels
+        <em>inline</em>, in order, mixed with the actual records.
+      </p>
+      <p>
+        When an operator with more than one input receives a barrier on one input, it
+        <strong>aligns</strong>: it buffers that input and waits until the <em>same</em> barrier
+        arrives on every other input. Alignment guarantees the snapshot reflects a consistent cut of
+        the dataflow — every operator's state corresponds to "all records before barrier <em>n</em>,
+        none after." Once aligned, the operator snapshots its state asynchronously to the
+        <strong>state backend</strong> and forwards the barrier downstream. When all operators and
+        sinks acknowledge barrier <em>n</em>, checkpoint <em>n</em> is <strong>complete</strong> and
+        durable.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> a checkpoint is a globally consistent cut
+          taken without stopping the stream. Combined with a Beam <em>bundle</em> as the unit of
+          commit, re-processing after a crash replays only the records since the last completed
+          checkpoint — so counted state is <em>restored</em>, never double-counted.
+        </div>
+      </div>
+
+      <h2>Exactly-once STATE is not exactly-once OUTPUT</h2>
+      <p>
+        On recovery Flink rewinds the sources and <strong>replays</strong>. Replay means a record can
+        be <em>re-emitted</em> to your sink. Checkpointing alone therefore gives exactly-once
+        <em>state</em> but only <strong>at-least-once</strong> at the boundary. End-to-end
+        exactly-once additionally needs the sink to be:
+      </p>
+      <ul>
+        <li><strong>Transactional</strong> — Kafka EOS via a transactional producer
+          (<em>two-phase commit</em>): a checkpoint's output is committed atomically and a
+          <code>read_committed</code> consumer never sees the records of an aborted attempt.</li>
+        <li><strong>Idempotent</strong> — a keyed upsert sink where re-writing the same key is a
+          no-op, achieving the same effect without transactions.</li>
+      </ul>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          Do not conflate the two. "Flink has exactly-once" refers to <em>state</em>. Whether your
+          <em>downstream system</em> sees each result once depends entirely on the sink's commit
+          protocol.
+        </div>
+      </div>
+
+      <h2>Savepoints, rescaling &amp; the runtime</h2>
+      <p>
+        <strong>Checkpoints</strong> are automatic, periodic, runtime-owned, and (by default) cleaned
+        up. <strong>Savepoints</strong> are manual, durable, portable images you trigger for upgrades
+        and rescaling. To <strong>rescale</strong>, take a savepoint, then restore at a new
+        parallelism; Flink redistributes keyed state across the new task slots via key-group
+        reassignment:
+      </p>
+      <pre><code class="language-bash">flink savepoint &lt;jobId&gt; s3://bucket/savepoints
+flink run -s s3://bucket/savepoints/savepoint-xxxx -p 4 job.jar   # restore at parallelism 4</code></pre>
+      <p>
+        The runtime splits into a <strong>JobManager</strong> (coordinates checkpoints, schedules the
+        JobGraph) and <strong>TaskManagers</strong> (run the operators in <em>task slots</em>; total
+        slots = available parallelism). Between operators, <strong>credit-based flow control</strong>
+        propagates <strong>backpressure</strong>: a slow downstream operator grants fewer buffer
+        credits, throttling upstream rather than dropping data. Watch all of this over the
+        <strong>Flink REST API</strong>: <code>/jobs/:id/checkpoints</code> and the back-pressure
+        endpoint. The <strong>state backend</strong> is configurable — <code>hashmap</code> (on-heap,
+        fast, bounded by RAM) vs <code>rocksdb</code> (on-disk, supports very large state).
+      </p>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>--checkpointing_interval</code> — how often barriers are injected (set inside
+          <code>portable_options</code>; smaller = less replay, more overhead).</li>
+        <li><code>portable_options(job_name, streaming=True)</code> — unbounded job, so checkpointing
+          is active.</li>
+        <li><code>ReadFromKafka</code> — a <em>replayable</em> source; offsets are committed with the
+          checkpoint (<code>enable.auto.commit=false</code>).</li>
+        <li><code>WriteToKafka</code> — the sink; configure a transactional producer for exactly-once
+          output.</li>
+        <li>Flink REST <code>/jobs/:id/checkpoints</code> + <code>state.backend</code> (hashmap /
+          rocksdb) + <code>savepoint</code> for rescaling.</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ic">🟧</span>
+        <div>
+          <strong>This chapter needs Kafka.</strong> Bring up the Kafka overlay and seed the topics
+          first: run <code>./scripts/up-kafka.sh</code> then <code>./scripts/seed-kafka.sh</code>.
+          The pipeline reads <code>clicks-in</code> and writes counts to <code>counts-out</code>.
+        </div>
+      </div>
+
+      <h2>The example pipeline</h2>
+      <p>
+        A Kafka streaming job (read clicks → window → count per user → write back to Kafka). The
+        transform graph is ordinary; the point is what survives a crash. The per-key window counts
+        are the <em>state</em> that ABS snapshots at each barrier:
+      </p>
+      <pre><code class="language-python">with beam.Pipeline(options=options) as p:   # portable_options(job_name, streaming=True)
+    counts = (
+        p
+        | "ReadClicks"   >> ReadFromKafka(           # replayable source; offsets ride the checkpoint
+              consumer_config={"bootstrap.servers": bootstrap,
+                               "enable.auto.commit": "false"},  # offsets owned by the checkpoint
+              topics=[known.input_topic])
+        | "KeyByUser"    >> beam.Map(lambda kv: (kv[0].decode() if kv[0] else "anon", 1))
+        | "Window"       >> beam.WindowInto(beam.window.FixedWindows(known.window_sec))
+        | "CountPerUser" >> beam.CombinePerKey(sum)   # this per-key count is the snapshotted STATE
+        | "ToKafkaRecord">> beam.MapTuple(to_count_record)
+    )
+    # For exactly-once OUTPUT, configure a transactional (EOS) producer on this sink:
+    counts | "WriteCounts" >> WriteToKafka(producer_config={"bootstrap.servers": bootstrap},
+                                           topic=known.output_topic)</code></pre>
+      <p>
+        Kill a TaskManager — <code>docker compose kill taskmanager</code> — and Flink rolls every
+        operator back to the last completed checkpoint and replays Kafka from the offsets stored in
+        it. Because Kafka is replayable and the counts were snapshotted, the per-window counts come
+        out identical: <strong>no double count</strong>. To rescale, take a savepoint and resubmit
+        with a higher <code>--parallelism</code>.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch16">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. In the Flink UI, open the job's
+        <strong>Checkpoints</strong> tab to watch barriers complete every ~10s, and the
+        <strong>Back Pressure</strong> tab to see credit-based flow control.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Barriers → align → snapshot</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  JM["JobManager<br/>checkpoint coordinator"] -.inject barrier n.-> A["Source A"]
+  JM -.inject barrier n.-> B["Source B"]
+  A -- "records + ║n" --> C["Count (keyed)<br/>align • snapshot"]
+  B -- "records + ║n" --> C
+  C -- "║n" --> S["Sink<br/>(EOS / 2-phase commit)"]
+  C -. ack n .-> JM
+  S -. ack n .-> JM
+  classDef cp fill:#fde7df,stroke:#e6526f,stroke-width:2px;
+  class C cp;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <button data-act="kill">💥 Kill TM</button>
+          <button data-act="heat">🔥 Backpressure</button>
+          <span class="ctl-note">step the barrier wave; kill a TaskManager to replay</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/barrier-snapshot.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

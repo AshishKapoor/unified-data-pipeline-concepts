@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 05 — Keyed Aggregation: GroupByKey, CoGroupByKey, Flatten · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch05">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch04.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch06.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 05 — Keyed Aggregation: GroupByKey, CoGroupByKey, Flatten</h1>
+      <p class="concept-summary">
+        Three keyed/collection primitives underpin everything else: <strong>GroupByKey</strong> (the
+        shuffle), <strong>CoGroupByKey</strong> (relational joins), and <strong>Flatten</strong> (union).
+        Master the shuffle and you understand why pipelines cost what they cost.
+      </p>
+
+      <h2>Concept</h2>
+      <p>
+        Most useful aggregations are <em>keyed</em>: "count clicks <strong>per user</strong>", "join
+        events to a profile <strong>by user_id</strong>". In Beam a keyed element is just a
+        <strong>KV</strong> — a 2-tuple <code>(key, value)</code> — and the keyed transforms key off
+        <code>element[0]</code>.
+      </p>
+      <p>
+        <code>GroupByKey</code> (GBK) is <em>the</em> fundamental keyed primitive. Given a
+        <code>PCollection</code> of <code>(K, V)</code> it returns <code>(K, Iterable[V])</code>: it
+        brings <strong>every value for a key onto the same worker</strong>. That movement of data
+        across the network is the <strong>shuffle</strong>, and it is simultaneously the most
+        important and the most expensive thing a runner does. On Flink, a GBK becomes a
+        <em>keyed network exchange</em> — records are hash-partitioned by key and redistributed so
+        the runner can gather a key's values together.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> grouping is not free. GBK <em>shuffles</em>
+          all your data over the network. Everything you learn later about <em>Combine</em> (Ch 6),
+          windows, and triggers is, in part, about controlling <em>what</em> gets shuffled and
+          <em>when</em>.
+        </div>
+      </div>
+
+      <p>
+        <code>CoGroupByKey</code> (CoGBK) is GBK generalised to <em>several</em> inputs — a
+        <strong>relational join</strong>. You hand it a dict of tagged keyed collections; it
+        co-groups them by their common key and returns, per key, the matching values from each side.
+        We use it to enrich every click with the user's profile. If one side has no match (user
+        <code>u4</code> has clicks but no profile), that side simply comes back empty — giving you a
+        left/outer-join shape that you handle yourself.
+      </p>
+      <p>
+        <code>Flatten</code> is the odd one out: it does <strong>not</strong> group or shuffle. It
+        <em>unions</em> N collections <strong>of the same element type</strong> into one — think SQL
+        <code>UNION ALL</code>. We use it to merge two click streams (e.g. two regions) into a single
+        collection before grouping.
+      </p>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>On unbounded data, GBK/CoGBK require a window.</strong> You cannot group "all
+          values for a key" if the key never stops receiving values. A <em>window</em> bounds the
+          grouping in event time. This chapter is <strong>bounded</strong>, so the default
+          <em>global window</em> is implicit and we don't declare one — but Ch 9 onward you must.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.GroupByKey</code> — <code>(K, V)</code> → <code>(K, Iterable[V])</code>; the shuffle primitive.</li>
+        <li><code>beam.CoGroupByKey</code> — co-group several tagged keyed PCollections; a relational join.</li>
+        <li><code>beam.Flatten</code> — union N PCollections of the same type (no grouping, no shuffle).</li>
+        <li><strong>KV</strong> — a plain <code>(key, value)</code> tuple; keyed transforms key off <code>element[0]</code>.</li>
+        <li><code>beam.FlatMap</code> / <code>beam.Map</code> — used here to format and log the grouped/joined rows.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        Two keyed collections — clicks and profiles, both keyed by <code>user_id</code>. We
+        <em>Flatten</em> two click streams, <em>GroupByKey</em> the union, and <em>CoGroupByKey</em>
+        clicks against profiles to enrich each click:
+      </p>
+      <pre><code class="language-python">with beam.Pipeline(options=options) as p:
+    clicks      = p | "Clicks"     >> beam.Create(CLICKS)       # (user_id, path)
+    more_clicks = p | "MoreClicks" >> beam.Create(MORE_CLICKS)  # a second click stream
+    profiles    = p | "Profiles"   >> beam.Create(PROFILES)     # (user_id, {name, plan})
+
+    # Flatten: UNION two click streams (same element type) — no shuffle.
+    all_clicks = (clicks, more_clicks) | "UnionClicks" >> beam.Flatten()
+
+    # GroupByKey: the shuffle. (user_id, path) -> (user_id, [paths...]).
+    (all_clicks
+        | "GroupClicksByUser" >> beam.GroupByKey()
+        | "LogGrouped"        >> beam.Map(lambda kv: logging.info(format_grouped(kv))))
+
+    # CoGroupByKey: relational join, enrich each click with its profile.
+    ({"clicks": all_clicks, "profile": profiles}
+        | "JoinClicksToProfiles" >> beam.CoGroupByKey()
+        | "Enrich"               >> beam.FlatMap(enrich_with_profile)
+        | "LogEnriched"          >> beam.Map(lambda line: logging.info(line)))</code></pre>
+      <p>
+        The submitter ships this graph to the Beam Flink Job Server. In the Flink UI the
+        <code>GroupByKey</code> and <code>CoGroupByKey</code> stages show up as keyed exchanges — the
+        shuffle — between operators. The animation on the right walks through exactly that movement.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch05">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The grouped
+        (<code>[GBK] …</code>) and enriched (<code>[CoGBK] …</code>) lines are logged from the
+        workers, so you'll see them in the Flink TaskManager logs as the job runs.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>The shuffle: GroupByKey &amp; CoGroupByKey</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  C1["clicks<br/>(user_id, path)"] --> FL["Flatten<br/>(union)"]
+  C2["more_clicks<br/>(user_id, path)"] --> FL
+  FL --> GBK["GroupByKey<br/>(K, [V…])"]
+  FL --> CG["CoGroupByKey<br/>(join)"]
+  PR["profiles<br/>(user_id, profile)"] --> CG
+  CG --> EN["enriched clicks"]
+  classDef shuffle fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class GBK,CG shuffle;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">watch same-key chips co-locate</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/shuffle.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

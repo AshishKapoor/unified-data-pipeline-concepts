@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 10 — Watermarks · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch10">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch09.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch11.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 10 — Watermarks: How the System Knows Event Time Advanced</h1>
+      <p class="concept-summary">
+        A watermark <strong>W(t)</strong> is the runner's promise: <em>"I have now seen every element
+        with event time ≤ W."</em> It is the heartbeat that closes windows — and it propagates as the
+        <strong>minimum across an operator's input channels</strong>.
+      </p>
+
+      <h2>Concept</h2>
+      <p>
+        Windows (Ch 9) chop the timeline into buckets, but a bucket is useless until the system can
+        say <em>"this bucket is complete — no more data is coming for it."</em> In a stream there is no
+        end-of-file to signal that. The mechanism that fills the gap is the <strong>watermark</strong>:
+        a monotonically advancing event-time value that travels through the pipeline alongside the
+        data. At processing-time <code>t</code>, a watermark of <code>W(t)</code> asserts that the
+        runner believes <em>all</em> elements with event time <code>≤ W(t)</code> have already
+        arrived. It is, in one phrase, the system's <strong>estimate of completeness for the past</strong>.
+      </p>
+      <p>
+        Crucially, watermarks lag the wall clock. If events arrive a few seconds after the moment they
+        describe (network hops, batching, retries), the watermark trails processing time by roughly
+        that amount. We make this visible in the lab by stamping every event a fixed
+        <code>lag_sec</code> in the past, so the source watermark always sits behind "now".
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> a window does not fire when wall-clock time
+          says it should — it fires when the <em>watermark</em> crosses the window's end. Watermark
+          advance is literally <em>what closes windows</em>.
+        </div>
+      </div>
+
+      <h2>Perfect vs heuristic watermarks</h2>
+      <p>
+        A <strong>perfect</strong> watermark is one the source can <em>prove</em>: replaying a file in
+        event-time order, or reading a partition whose timestamps are monotonic, lets the source assert
+        completeness with certainty. Most real sources can't prove it and instead emit a
+        <strong>heuristic</strong> watermark — a best guess based on observed skew. The trade-off is
+        sharp: a heuristic that runs <em>ahead</em> of reality declares windows complete too early and
+        creates <strong>late data</strong> (Ch 12); one that lags too far <em>conservatively</em>
+        wastes latency, holding results back longer than necessary.
+      </p>
+
+      <h2>Propagation: MIN across input channels</h2>
+      <p>
+        An operator rarely has a single input. A <code>GroupByKey</code> is fed by a shuffle from
+        <em>every</em> upstream partition; a flatten merges several streams. Such an operator can only
+        claim completeness up to its <strong>slowest</strong> input — so its output watermark is the
+        <strong>min</strong> over all input channels. This is the rule that gives watermarks their
+        teeth: a single slow input drags the whole downstream min down with it.
+      </p>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>The idle-input trap.</strong> If one input channel goes silent — not finished, just
+          temporarily producing nothing — its watermark stops advancing, and because the output is a
+          <code>min</code>, the <em>entire</em> downstream watermark <strong>freezes</strong>. Windows
+          stop firing even though data is flowing on the other channels. Flink's
+          <code>withIdleness</code> fixes this by marking a quiet source idle so it stops "voting" in
+          the min, letting the live channels advance the watermark again.
+        </div>
+      </div>
+
+      <h2>How Flink and Beam cooperate</h2>
+      <p>
+        On the portable runner the division of labour is clean. <strong>Flink</strong> owns watermark
+        generation and propagation: each operator subtask carries a "Low Watermark" you can read in the
+        Web UI, computed by exactly the min rule above. <strong>Beam</strong> consumes that watermark to
+        decide pane firing — with the default <code>AfterWatermark</code> trigger (Ch 11), a window
+        emits the instant the watermark passes its end, and its per-key state is then garbage-collected
+        (subject to allowed lateness, Ch 12).
+      </p>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><strong>Watermarks</strong> — the runner-maintained event-time frontier; on Flink, the
+          per-operator "Low Watermark" surfaced in the Web UI.</li>
+        <li><code>beam.WindowInto(FixedWindows(n))</code> — assigns elements to fixed windows whose
+          ends the watermark must cross to fire.</li>
+        <li><code>DoFn.WindowParam</code> / <code>DoFn.PaneInfoParam</code> — inspect the firing
+          window's bounds and pane timing from inside a <code>DoFn</code>.</li>
+        <li><code>SyntheticEvents(lag_sec=…)</code> — our shared source that stamps events in the past
+          so the watermark visibly trails processing time.</li>
+        <li>Default <code>AfterWatermark</code> trigger — the link between watermark advance and a
+          window firing (detailed in Ch 11).</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        An unbounded stream whose event times trail wall-clock by <code>lag_sec</code>, windowed into
+        fixed buckets. The <code>LogFiring</code> DoFn logs each firing relative to the watermark, so
+        you can <em>see</em> windows close ~<code>lag_sec</code> seconds after their wall-clock end:
+      </p>
+      <pre><code class="language-python">with beam.Pipeline(options=options) as p:
+    (
+        p
+        # event_time = processing_time - lag  → source watermark trails the wall clock
+        | "SyntheticEvents" >> SyntheticEvents(events_per_sec=4, lag_sec=known.event_time_lag)
+        | "KeyBySensor"     >> beam.Map(lambda e: (e["key"], e["value"]))
+        | "FixedWindows"    >> beam.WindowInto(FixedWindows(known.window_size))
+        | "CountPerKeyWindow" >> combiners.Count.PerKey()   # fires when watermark > window end
+        | "LogFiring"       >> beam.ParDo(LogWindowFiring())  # logs firing vs the watermark
+    )</code></pre>
+      <p>
+        The <code>LogWindowFiring</code> DoFn reads <code>DoFn.WindowParam</code> to get the window's
+        <code>[start, end)</code> and reports how far <code>window.end</code> trails the current wall
+        clock — a direct readout of how long the watermark took to cross it. Those lines land in the
+        <strong>TaskManager</strong> logs (worker side), while the submitter stream below shows the job
+        lifecycle.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🔎</span>
+        <div>
+          <strong>Watch the watermarks in Flink.</strong> After you run, open the job in the Flink Web
+          UI, click a windowing/aggregation operator, and read its <em>Low Watermark</em> per subtask.
+          It will lag wall-clock by about <code>event_time_lag</code> and advance only as the source's
+          watermark advances — the min-across-inputs rule, live.
+        </div>
+      </div>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch10">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The per-window firing lines
+        (<code>WINDOW FIRED …</code>) are emitted on the workers, so read those in the
+        <strong>TaskManager</strong> logs / Flink UI rather than here.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Output watermark = MIN(inputs)</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  A["channel A<br/>W = 90"] --> OP{{"operator<br/>out = min(A,B)"}}
+  B["channel B<br/>W = 30 (idle)"] --> OP
+  OP --> OUT["downstream<br/>W = 30 ⟂ frozen"]
+  classDef slow fill:#fff3df,stroke:#f59e0b,stroke-width:2px;
+  classDef op fill:#fde7df,stroke:#e6526f,stroke-width:2px;
+  class B slow;
+  class OUT slow;
+  class OP op;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">watch B go idle and freeze the min</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/watermark-min.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

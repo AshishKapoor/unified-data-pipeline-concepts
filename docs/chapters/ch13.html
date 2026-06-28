@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 13 — Stateful Processing: State &amp; Timers in DoFn · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch13">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch12.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch14.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 13 — Stateful Processing: State &amp; Timers in DoFn</h1>
+      <p class="concept-summary">
+        Give a <code>DoFn</code> private, durable memory — <strong>state cells scoped per key, per
+        window</strong> — plus <strong>timers</strong> it can arm to wake itself up in event time or
+        processing time. These are the raw primitives every streaming feature is built on.
+      </p>
+
+      <h2>Concept: from stateless to stateful</h2>
+      <p>
+        Everything so far was effectively stateless <em>from your code's point of view</em>:
+        <code>GroupByKey</code>, <code>Combine</code>, and windowing carry state for you, but your
+        functions never touched a cell directly. A <strong>stateful DoFn</strong> opens the lid. For
+        each <strong>(key, window)</strong> the runner hands your DoFn a small set of private
+        <em>state cells</em> and lets it schedule <em>timers</em>. The runner shuffles by key first,
+        so each key's state lives on exactly one worker — user-A's buffer never sees user-B's events.
+      </p>
+      <p>
+        This is how you implement sessionization, deduplication, join-with-timeout, rate limiting, and
+        fraud heuristics <em>by hand</em>, with full control over <em>what</em> you remember and
+        <em>when</em> you act on it.
+      </p>
+
+      <h2>The three state cells we use</h2>
+      <ul>
+        <li>
+          <code>ReadModifyWriteStateSpec</code> → a <strong>ValueState</strong>: one mutable slot you
+          can <code>read()</code> / <code>write(v)</code> / <code>clear()</code>. Here it remembers the
+          latest event time seen for the user.
+        </li>
+        <li>
+          <code>BagStateSpec</code> → a <strong>BagState</strong>: an append-only multiset you
+          <code>add()</code> to, then <code>read()</code> + <code>clear()</code>. Here it buffers the
+          raw events of the in-progress session.
+        </li>
+        <li>
+          <code>CombiningValueStateSpec</code> → a <strong>CombiningState</strong>: a running aggregate
+          folded through a <code>CombineFn</code> (we use <code>sum</code>). The runner keeps only the
+          accumulator — far cheaper than counting the whole bag.
+        </li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> state and timers are automatically
+          <em>keyed and windowed</em> by the runner. You never look up a key — you just read and write
+          "your" cells, and the runtime guarantees they belong to the element's key and window.
+        </div>
+      </div>
+
+      <h2>Timers: waking yourself up</h2>
+      <p>
+        A <code>TimerSpec</code> declares a timer in a <strong>time domain</strong>. A method decorated
+        with <code>@on_timer(SPEC)</code> is the callback the runner invokes when it fires — and inside
+        that callback you may read/clear the same cells and <code>yield</code> output.
+      </p>
+      <ul>
+        <li>
+          <code>TimeDomain.WATERMARK</code> — fires when the <strong>watermark</strong> passes the set
+          <em>event-time</em> instant. Perfect for "the session has been idle for N seconds of event
+          time". This pipeline uses exactly this.
+        </li>
+        <li>
+          <code>TimeDomain.REAL_TIME</code> — fires at a wall-clock (<strong>processing-time</strong>)
+          instant, regardless of where the watermark is.
+        </li>
+      </ul>
+      <p>
+        Re-setting a timer to a new instant simply <em>overwrites</em> the old one, so a steady stream
+        keeps pushing an idle-gap deadline out — the timer only fires after a genuine lull.
+      </p>
+
+      <h2>Beam state → Flink checkpointed state</h2>
+      <p>
+        On the portable Flink runner these cells become <strong>Flink keyed, checkpointed state</strong>
+        (ValueState / ListState / AggregatingState) in the configured state backend, and timers become
+        Flink event-time / processing-time timers. So everything here participates in checkpointing and
+        is restored <em>exactly-once</em> after failure (Ch 16).
+      </p>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Stay on the mature trio.</strong> The exotic Beam state types
+          (<code>OrderedListState</code>, <code>MultimapState</code>, <code>SetState</code>) are still
+          <em>less mature in Python-on-Flink</em>. This course sticks to the rock-solid
+          <strong>Value / Bag / Combining</strong> cells, which map cleanly onto Flink state.
+          Also: always <code>clear()</code> your cells when a session ends — otherwise per-key state
+          grows without bound, the classic stateful-pipeline memory leak.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>apache_beam.transforms.userstate</code> — home of the state &amp; timer specs.</li>
+        <li><code>ReadModifyWriteStateSpec</code> / <code>BagStateSpec</code> / <code>CombiningValueStateSpec</code> — the three cell types.</li>
+        <li><code>TimerSpec(name, TimeDomain.WATERMARK)</code> — declare an event-time timer.</li>
+        <li><code>beam.DoFn.StateParam</code> / <code>beam.DoFn.TimerParam</code> — inject the cells/timers into <code>process</code>.</li>
+        <li><code>@on_timer(SPEC)</code> — the callback the runner fires when a timer matures.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        A per-user "session / fraud-ish" detector. Each event buffers into a <strong>BagState</strong>,
+        bumps a <strong>CombiningState</strong> count, and <em>re-arms</em> an event-time gap timer. When
+        the watermark proves the user has been idle for <code>GAP</code> seconds, <code>@on_timer</code>
+        fires, drains the bag, emits one session summary, and clears every cell:
+      </p>
+      <pre><code class="language-python">class SessionizingDoFn(beam.DoFn):
+    BUFFER  = BagStateSpec("buffer", beam.coders.PickleCoder())     # raw events
+    COUNT   = CombiningValueStateSpec("count", VarIntCoder(), sum)  # running count
+    LAST_TS = ReadModifyWriteStateSpec("last_ts", FloatCoder())     # newest event time
+    GAP_TIMER = TimerSpec("gap_timer", TimeDomain.WATERMARK)        # event-time idle timer
+
+    def process(self, element, timestamp=beam.DoFn.TimestampParam,
+                buffer=beam.DoFn.StateParam(BUFFER),
+                count=beam.DoFn.StateParam(COUNT),
+                last_ts=beam.DoFn.StateParam(LAST_TS),
+                gap_timer=beam.DoFn.TimerParam(GAP_TIMER)):
+        _user, event = element
+        buffer.add(event)                 # BagState.add
+        count.add(1)                      # CombiningState folds via sum
+        last_ts.write(float(timestamp))   # ValueState.write
+        gap_timer.set(timestamp + Duration(seconds=SESSION_GAP_SEC))  # (re)arm the idle gap
+
+    @on_timer(GAP_TIMER)
+    def on_gap(self, buffer=beam.DoFn.StateParam(BUFFER),
+               count=beam.DoFn.StateParam(COUNT),
+               last_ts=beam.DoFn.StateParam(LAST_TS)):
+        events, total = list(buffer.read()), count.read() or 0
+        flag = "BURST" if total &gt;= BURST_THRESHOLD else "ok"
+        buffer.clear(); count.clear(); last_ts.clear()   # always clear, or state leaks
+        yield (flag, {"events": total, "flag": flag})</code></pre>
+      <p>
+        The input must be keyed — stateful DoFns <em>require</em> a <code>KV</code> so the runner can
+        shuffle by key. We key the synthetic stream by user, drop it in the global window (sessions are
+        delimited by our timer, not by windowing), then <code>ParDo</code> the stateful DoFn.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch13">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        This is a <strong>streaming</strong> job: it runs for the synthetic stream's duration. Watch the
+        log for <code>session flushed</code> / <code>EMIT</code> lines as each user's gap timer fires.
+        Open the Flink UI to see the keyed state operator and its checkpoints.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Per-key state cells &amp; the gap timer</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  IN["KV(user, event)"] --> SH{{"shuffle by key"}}
+  SH --> A["state(user-A)<br/>Bag · Count · Timer"]
+  SH --> B["state(user-B)<br/>Bag · Count · Timer"]
+  A -. "@on_timer (idle gap)" .-> OUT["session summary"]
+  B -. "@on_timer (idle gap)" .-> OUT
+  classDef cell fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class A,B cell;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">events fill the cells; the timer fires the flush</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/state-cells.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

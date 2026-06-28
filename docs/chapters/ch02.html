@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 02 — Core Abstractions · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch02">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch01.html">← prev</a>
+      <a href="/docs/chapters/ch03.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 02 — Core Abstractions: Pipeline, PCollection, PTransform, PValue</h1>
+      <p class="concept-summary">
+        Beam has only four load-bearing nouns. Master them and every transform you ever write reads
+        cleanly — and every element secretly carries
+        <strong>value + event-timestamp + window(s) + pane-info</strong>.
+      </p>
+
+      <h2>Concept — the four primitives</h2>
+      <p>
+        Apache Beam's API surface is large, but its conceptual core is tiny. Four types do all the
+        work, and they fit together like nouns in a sentence:
+      </p>
+      <ul>
+        <li>
+          <strong><code>Pipeline</code></strong> — the container and the directed acyclic graph you
+          attach transforms to. Crucially, building a pipeline <em>does nothing</em>: it merely
+          records the graph. Execution is <strong>deferred</strong> until the
+          <code>with</code>-block exits and the runner takes over.
+        </li>
+        <li>
+          <strong><code>PValue</code></strong> — the abstract thing that flows between nodes. Its
+          start-of-graph form is <code>PBegin</code> (what you get from <code>p |&nbsp;…</code>); its
+          everyday form is a…
+        </li>
+        <li>
+          <strong><code>PCollection</code></strong> — an <em>immutable</em>, <em>distributed</em>,
+          <em>possibly-unbounded</em> bag of elements. It is emphatically <em>not</em> a Python list:
+          you cannot index it, its order is undefined, and it carries two pieces of hidden state — a
+          <strong>coder</strong> (how to serialize elements between workers) and a
+          <strong>windowing strategy</strong>.
+        </li>
+        <li>
+          <strong><code>PTransform</code></strong> — a graph node that consumes PValues and produces
+          PValues. You apply one with the <code>pcoll | "Label" >> transform</code> operator.
+        </li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> a PCollection is not a collection of bare
+          values. Every element is conceptually a 4-tuple
+          <code>(value, event-timestamp, window(s), pane-info)</code> — and those fields exist even
+          in a plain bounded job where you never set them.
+        </div>
+      </div>
+
+      <h2>Composite transforms — abstraction in Beam</h2>
+      <p>
+        Reuse in Beam comes from <strong>composite</strong> PTransforms. You subclass
+        <code>beam.PTransform</code> and override <code>expand()</code>, which receives the input
+        PCollection and must return a PValue. Inside, you wire together smaller inner transforms.
+        Beam's own built-ins (<code>combiners.Count</code>, <code>GroupByKey</code> wrappers, IO
+        connectors) are all composites — it is composites all the way down.
+      </p>
+      <p>
+        The labels you attach with <code>>></code> are not cosmetic: they nest. An inner
+        <code>"AddScore"</code> applied inside a composite labelled <code>"ScoreAndKeep"</code>
+        renders in the Flink/Dataflow UI as a collapsible sub-graph, so a 200-node pipeline reads
+        like an outline.
+      </p>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Immutability is a contract, not a guard.</strong> Beam will not stop you mutating a
+          dict in place inside a <code>Map</code>, but doing so is undefined behaviour once the
+          element is shared, cached for a retry, or fused across stages. Always build and return a
+          <em>new</em> object.
+        </div>
+      </div>
+
+      <h2>The anatomy of an element</h2>
+      <p>
+        Because we never set a timestamp or window, it is tempting to think the metadata is absent.
+        It isn't. We expose it with a <code>DoFn</code> that asks the runner to inject the implicit
+        fields via the special default parameters <code>beam.DoFn.TimestampParam</code>,
+        <code>beam.DoFn.WindowParam</code>, and <code>beam.DoFn.PaneInfoParam</code>. For records
+        created by <code>beam.Create</code> with no explicit timestamp you will see the timestamp pin
+        to <code>MIN_TIMESTAMP</code> and the window resolve to the single <code>GlobalWindow</code>
+        — the defaults every Beam element is born with. The animation on the right peels these four
+        layers apart one at a time.
+      </p>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.Create</code> — turn an in-memory iterable into a bounded PCollection.</li>
+        <li><code>beam.PTransform</code> + <code>expand()</code> — build a custom composite node.</li>
+        <li><code>beam.Map</code> / <code>beam.Filter</code> — the two inner transforms (1→1, 1→0|1).</li>
+        <li><code>beam.ParDo</code> + <code>beam.DoFn</code> — the general element-wise transform.</li>
+        <li>
+          <code>beam.DoFn.TimestampParam</code>, <code>WindowParam</code>, <code>PaneInfoParam</code>
+          — inject an element's implicit metadata into <code>process()</code>.
+        </li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        A custom composite (<code>Map</code> then <code>Filter</code>) hidden behind one labelled
+        node, followed by a pass-through DoFn that logs each element's four layers:
+      </p>
+      <pre><code class="language-python">class ScoreAndKeep(beam.PTransform):
+    """A composite: enrich (Map) then drop low scorers (Filter)."""
+    def expand(self, pcoll):
+        return (
+            pcoll
+            | "AddScore"      >> beam.Map(self._add_score)      # 1 -> 1
+            | "DropLowScores" >> beam.Filter(                   # 1 -> 0 or 1
+                lambda rec: rec["score"] >= self._threshold)
+        )
+
+class LogElementAnatomy(beam.DoFn):
+    def process(self, element,
+                timestamp=beam.DoFn.TimestampParam,   # event-timestamp
+                window=beam.DoFn.WindowParam,         # window(s)
+                pane=beam.DoFn.PaneInfoParam):        # pane-info
+        logging.info("value=%r ts=%s window=%s pane=%s",
+                     element, timestamp, window, pane)
+        yield element                                  # pass through unchanged
+
+with beam.Pipeline(options=options) as p:              # deferred: nothing runs yet
+    created = p       | "Create"       >> beam.Create(records)
+    kept    = created | "ScoreAndKeep" >> ScoreAndKeep(known.threshold)
+    _       = kept    | "LogAnatomy"   >> beam.ParDo(LogElementAnatomy())</code></pre>
+      <p>
+        The submitter ships this graph to the Beam Flink Job Server, which expands the composite into
+        its inner Map/Filter and submits the resulting JobGraph to the JobManager. Open the Flink UI
+        to watch the job — the composite appears as a single collapsible operator.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch02">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The per-element
+        <code>ELEMENT anatomy</code> lines are emitted on the <em>workers</em>, so they land in the
+        TaskManager / SDK-harness logs rather than the submitter's stdout.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>A composite expands; an element has four layers</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart TB
+  C["Create(records)"] --> SK
+  subgraph SK["ScoreAndKeep · composite PTransform"]
+    direction LR
+    M["AddScore<br/>(beam.Map)"] --> F["DropLowScores<br/>(beam.Filter)"]
+  end
+  SK --> L["LogAnatomy<br/>(beam.ParDo)"]
+  classDef comp fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class SK comp;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">click a slab to reveal a layer</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/element-anatomy.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

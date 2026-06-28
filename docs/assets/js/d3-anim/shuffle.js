@@ -45,13 +45,7 @@ export function mount(selectorOrEl) {
   // Right side is grouped by key (one partition per key, stacked), so same-key elements co-locate.
   const items = INPUT.map((d, i) => ({ ...d, id: i }));
 
-  // Left slots: stack within each lane in arrival order.
-  const laneCounters = [0, 0];
-  items.forEach((d) => {
-    d.x0 = d.lane === 0 ? leftX : leftX;
-    d.y0 = topY + (d.lane === 0 ? 0 : (laneCounters[0]) * 0) ; // placeholder, set below
-  });
-  // Place left items: two vertical stacks side-by-side-ish (lane 0 upper block, lane 1 lower block).
+  // Place left items: two vertical stacks (lane 0 upper block, lane 1 lower block).
   const lane0 = items.filter((d) => d.lane === 0);
   const lane1 = items.filter((d) => d.lane === 1);
   lane0.forEach((d, i) => { d.x0 = leftX; d.y0 = topY + i * rowH; });

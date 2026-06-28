@@ -65,7 +65,7 @@ class FakeClient:
 
     def close(self) -> None:
         self.open = False
-        _LOG.info("FakeClient CLOSE    (worker=%s)  <- teardown() released the resource", worker_tag := self.worker_tag)
+        _LOG.info("FakeClient CLOSE    (worker=%s)  <- teardown() released the resource", self.worker_tag)
 
 
 class LifecycleDoFn(beam.DoFn):

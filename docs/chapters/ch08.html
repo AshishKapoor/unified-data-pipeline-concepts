@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 08 — The Streaming Mindset · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch08">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch07.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch09.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 08 — The Streaming Mindset: WHAT / WHERE / WHEN / HOW</h1>
+      <p class="concept-summary">
+        Every event has <strong>two clocks</strong>: when it <em>happened</em> (event time) and when
+        you <em>saw</em> it (processing time). The gap is <strong>skew</strong>, and because of it,
+        out-of-order arrival is the default. Four questions tame the chaos: <strong>WHAT / WHERE /
+        WHEN / HOW</strong>.
+      </p>
+
+      <h2>Concept — two clocks, never the same</h2>
+      <p>
+        In batch you have the luxury of a complete, finished dataset: there is effectively only one
+        clock, because everything is already here. Streaming removes that luxury. Now every element
+        carries an <strong>event time</strong> — the instant the thing actually occurred, stamped at
+        the source (a click, a sensor reading, a sale). That timestamp is intrinsic to the data and
+        never changes.
+      </p>
+      <p>
+        Against it runs <strong>processing time</strong> — the wall-clock instant at which your
+        pipeline <em>observes</em> the element. Processing time depends on the network, on queues and
+        retries, on GC pauses and scheduling. So the two clocks drift, and the gap between them is
+        <strong>skew</strong>.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> because of skew,
+          <strong>out-of-order arrival is the default, not the exception</strong>. An event that
+          happened <em>earlier</em> can be observed <em>later</em> than one that happened after it.
+          Any correct streaming design must assume the stream is unsorted.
+        </div>
+      </div>
+
+      <p>
+        A picture helps: plot each element with processing time on the x-axis and event time on the
+        y-axis. If the two clocks agreed, every point would sit on the diagonal. In reality points
+        fall <em>below</em> the diagonal — event time lags the wall clock — and they scatter, because
+        skew is not constant. That is exactly what the animation on the right shows.
+      </p>
+
+      <h2>The four questions</h2>
+      <p>
+        Beam (the Dataflow model) structures <em>every</em> streaming computation as the answers to
+        four questions. This chapter only makes the first one concrete; the next four chapters answer
+        the rest in turn — but knowing the whole map up front is what makes them click.
+      </p>
+      <ul>
+        <li><strong>WHAT</strong> results are computed? → <em>transforms</em> (<code>Map</code>,
+          <code>GroupByKey</code>, <code>Combine</code>). This chapter.</li>
+        <li><strong>WHERE</strong> in event time? → <em>windowing</em> (Ch 9: fixed, sliding,
+          sessions, global).</li>
+        <li><strong>WHEN</strong> in processing time are results emitted? → <em>watermarks</em> and
+          <em>triggers</em> (Ch 10–11).</li>
+        <li><strong>HOW</strong> do successive refinements relate? → <em>accumulation mode</em>
+          (discarding vs accumulating, Ch 11).</li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">🧭</span>
+        <div>
+          A useful mantra: <strong>WHERE lives in event time, WHEN lives in processing time.</strong>
+          You decide <em>which</em> events belong together by their event time (windowing), but you
+          decide <em>when to fire</em> a result by watching processing time and the watermark.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.window.TimestampedValue</code> — wraps a record with an explicit event-time
+          timestamp (here applied for us by <code>ReplayEvents</code>).</li>
+        <li><code>beam.DoFn.TimestampParam</code> — a magic <code>process()</code> parameter that
+          injects the element's <em>event time</em> into your <code>DoFn</code>.</li>
+        <li><code>time.time()</code> inside <code>process()</code> — reads <em>processing time</em>;
+          the difference from the event time is the skew.</li>
+        <li><code>_common.replay.ReplayEvents</code> — replays records in a chosen
+          <code>emission_order</code> so arrival order deliberately differs from event-time order.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        Five events spaced 10 seconds apart in event time, but <em>replayed out of order</em> — so
+        the pipeline sees event time jump backwards. A <code>DoFn</code> logs both clocks and their
+        skew for every element:
+      </p>
+      <pre><code class="language-python"># arrival order != event-time order: C(+20) arrives before A(+0) ...
+EMISSION_ORDER = [2, 0, 4, 1, 3]   # -> C, A, E, B, D
+
+class LogSkew(beam.DoFn):
+    def process(self, element, event_ts=beam.DoFn.TimestampParam):
+        processing_now = time.time()                 # WHEN we observed it
+        event_seconds  = float(event_ts)             # WHEN it happened
+        skew = processing_now - event_seconds        # the gap
+        logging.info("id=%s EVENT_TIME=%.0f PROCESSING_TIME=%.3f SKEW=%.3fs",
+                     element["id"], event_seconds, processing_now, skew)
+        yield {**element, "skew": skew}
+
+with beam.Pipeline(options=options) as p:
+    (
+        p
+        | "ReplayOutOfOrder"          >> ReplayEvents(EVENTS, emission_order=EMISSION_ORDER)
+        | "LogEventVsProcessingTime"  >> beam.ParDo(LogSkew())
+    )</code></pre>
+      <p>
+        There is no <code>WindowInto</code>, no trigger, no accumulation here yet — that is the whole
+        point. First <em>feel</em> the two clocks; Chapters 9–12 then answer WHERE, WHEN, and HOW.
+        Because the <code>SKEW</code> lines are emitted by a <em>worker</em> <code>DoFn</code>, they
+        appear in the TaskManager logs in the Flink UI rather than the submitter's stdout.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch08">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The per-element
+        <code>EVENT_TIME / PROCESSING_TIME / SKEW</code> lines are worker output — open the
+        TaskManager logs in the Flink UI to read them as the events arrive out of order.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Two clocks &amp; the four questions</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart TB
+  subgraph Q["the four questions"]
+    direction TB
+    W1["WHAT results?"] --> T["transforms<br/>Map · GroupByKey · Combine"]
+    W2["WHERE in event time?"] --> WIN["windowing<br/>Fixed · Sliding · Sessions"]
+    W3["WHEN in processing time?"] --> TRG["watermarks + triggers"]
+    W4["HOW do refinements relate?"] --> ACC["accumulation mode"]
+  end
+  classDef here fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class W1,T here;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">play to grow the skew below the diagonal</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/time-skew.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

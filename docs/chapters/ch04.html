@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 04 — The Portable Runner Architecture · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch04">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch03.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch05.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 04 — Running on Flink for Real: The Portable Runner Architecture</h1>
+      <p class="concept-summary">
+        Python doesn't run <em>inside</em> Flink. The submitter ships a language-neutral pipeline
+        proto, the Job Server turns it into a Flink JobGraph, and TaskManagers call back to a Python
+        <strong>SDK harness</strong> over the <strong>Fn API</strong> to execute your code.
+      </p>
+
+      <h2>Concept: the portability boundary</h2>
+      <p>
+        Flink is a JVM engine; your transforms are Python. Those two facts cannot be reconciled by
+        magic, and the <strong>portable runner</strong> is how Beam reconciles them honestly. When
+        you submit, four distinct things happen, in order:
+      </p>
+      <ol>
+        <li>
+          <strong>Submitter builds a pipeline proto.</strong> Your Python constructs the pipeline in
+          memory, then Beam serialises it into a <em>language-neutral</em> proto (the Runner API).
+          Each <code>DoFn</code> becomes an opaque blob plus a description of the
+          <strong>environment</strong> needed to run it. Nothing JVM-specific is required to read it.
+        </li>
+        <li>
+          <strong>Job Server → JobGraph.</strong> The proto travels to the Beam Flink
+          <strong>Job Server</strong> (<code>--job_endpoint</code>). The Job Server stages your
+          artifacts and <em>translates</em> the proto into a Flink <strong>JobGraph</strong> — this
+          translation is literally what "the runner" is.
+        </li>
+        <li>
+          <strong>JobManager schedules it.</strong> The JobGraph is submitted to Flink's
+          <strong>JobManager</strong>, which schedules tasks across <strong>TaskManager</strong>
+          slots exactly like a native Flink job.
+        </li>
+        <li>
+          <strong>TaskManager ⇄ SDK harness over the Fn API.</strong> When a TaskManager reaches an
+          operator that wraps <em>your Python</em>, it can't run Python itself. It calls back to a
+          Beam <strong>SDK harness</strong> over the <strong>Fn API</strong> — four gRPC channels:
+          <em>control</em> (run this bundle), <em>data</em> (elements in/out), <em>state</em>
+          (read/write user state &amp; side inputs), and <em>logging</em>. The harness runs your
+          <code>DoFn</code> and streams results back.
+        </li>
+      </ol>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> the runner is a <em>translator</em>, and
+          the Fn API is the <em>contract</em> across the language boundary. Your Python never runs on
+          a TaskManager — it runs in an SDK harness that the TaskManager talks to.
+        </div>
+      </div>
+
+      <h2>Where does the harness live? <code>--environment_type</code></h2>
+      <p>
+        The proto says <em>which environment</em> each transform needs; <code>--environment_type</code>
+        tells the runner how to provide it. This single flag is the biggest operational lever in
+        portable Beam:
+      </p>
+      <ul>
+        <li>
+          <code>LOOPBACK</code> — the harness runs <strong>inside the submitting process</strong>.
+          Zero extra infrastructure, ideal for a laptop; but the submitter must stay alive for the
+          whole job. This is the dev lane this chapter demonstrates.
+        </li>
+        <li>
+          <code>DOCKER</code> — the runner starts a per-worker SDK <em>container</em>
+          (Docker-in-Docker). Self-contained but heavy and awkward inside a cluster; <strong>avoided</strong>
+          in this project.
+        </li>
+        <li>
+          <code>PROCESS</code> — the runner forks the harness as a plain OS process from a command
+          you supply. Lighter than Docker, no daemon needed.
+        </li>
+        <li>
+          <code>EXTERNAL</code> — the harness lives in a <strong>pre-started worker pool</strong>
+          sidecar that shares the TaskManager's network namespace (reached at
+          <code>localhost:50000</code>). This is <strong>this project's production lane</strong>: the
+          pool is up before any job, so there is no per-bundle container start-up cost.
+        </li>
+      </ul>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Artifact staging is part of submission, not execution.</strong> Pip dependencies,
+          your code, and pinned files are uploaded to the <code>--artifact_endpoint</code> before the
+          JobGraph runs, then distributed to harnesses. If staging is misconfigured, the job fails
+          <em>before</em> your first element is ever processed.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>PortableRunner</code> — the runner that speaks the portability framework to a Job Server.</li>
+        <li><code>--job_endpoint</code> — address of the Beam Flink Job Server that builds the JobGraph.</li>
+        <li><code>--artifact_endpoint</code> — where the submitter stages code/deps before execution.</li>
+        <li><code>--environment_type</code> / <code>--environment_config</code> — where the SDK harness lives (LOOPBACK / EXTERNAL / PROCESS / DOCKER).</li>
+        <li><strong>Fn API</strong> — the control / data / state / logging gRPC channels between TaskManager and harness.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        The graph is a deliberately tiny WordCount — the lesson is in the <em>journey</em>, not the
+        counting. The pipeline logs its <strong>effective submission contract</strong> so you can see
+        the runner / job_endpoint / environment_type your run actually used:
+      </p>
+      <pre><code class="language-python">std      = options.view_as(StandardOptions)
+portable = options.view_as(PortableOptions)
+
+logging.info("runner            = %s", std.runner)             # PortableRunner
+logging.info("job_endpoint      = %s", portable.job_endpoint)         # -> Beam Flink Job Server
+logging.info("artifact_endpoint = %s", portable.artifact_endpoint)   # -> artifact staging
+logging.info("environment_type  = %s", portable.environment_type)    # LOOPBACK / EXTERNAL / ...
+
+with beam.Pipeline(options=options) as p:
+    counts = (
+        p
+        | "ReadLines"   &gt;&gt; beam.io.ReadFromText(known.input)
+        | "Tokenize"    &gt;&gt; beam.FlatMap(split_words)     # runs in the SDK harness, not Flink
+        | "PairWithOne" &gt;&gt; beam.Map(lambda w: (w, 1))
+        | "CountPerWord"&gt;&gt; combiners.Count.PerKey()       # the shuffle lands on Flink
+        | "Format"      &gt;&gt; beam.MapTuple(lambda w, n: f"{w}: {n}")
+    )
+    counts | "WriteCounts" &gt;&gt; beam.io.WriteToText(known.output, file_name_suffix=".txt")</code></pre>
+      <p>
+        Watch the log: the submitter-side <code>logging.info</code> calls reach this panel over SSE,
+        but any <code>print</code> inside <code>split_words</code> would land in the
+        <em>harness</em> logging channel and show up in the TaskManager logs instead — a direct
+        consequence of where your code actually executes.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch04">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The word counts themselves are
+        written to <code>/tmp/beam-artifact-staging/ch04-wordcount*.txt</code> inside the cluster.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Python → Flink → back to Python</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  SUB["Python submitter<br/>(builds pipeline proto)"] --> JS["Beam Flink<br/>Job Server"]
+  JS -->|"proto → JobGraph"| JM["Flink<br/>JobManager"]
+  JM -->|"schedule"| TM["TaskManager<br/>(operators)"]
+  TM <-->|"Fn API:<br/>control · data · state · logging"| WP["EXTERNAL<br/>worker pool<br/>(SDK harness)"]
+  SUB -.->|"artifact staging"| JS
+  classDef beam fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  classDef flink fill:#fbe3e9,stroke:#e6526f,stroke-width:2px;
+  class SUB,WP beam;
+  class TM flink;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">watch the packet reach the TaskManager, then the Fn API lights up</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/submission-journey.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

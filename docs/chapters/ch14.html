@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 14 — Splittable DoFn (SDF) · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch14">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch13.html">← prev</a>
+      <a href="/docs/chapters/ch15.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 14 — Splittable DoFn (SDF): The Modern IO Primitive</h1>
+      <p class="concept-summary">
+        Generalize <code>DoFn</code> so that processing <em>one</em> element is a <strong>restriction</strong>
+        of work, tracked by a <strong>restriction tracker</strong> that supports <code>try_claim()</code> and
+        can be split into <strong>primary + residual</strong> at any moment. This one idea powers dynamic
+        work rebalancing, mid-element checkpointing, and every modern IO connector.
+      </p>
+
+      <h2>Concept</h2>
+      <p>
+        A plain <code>DoFn</code> processes an element <em>atomically</em>: <code>process()</code> runs
+        start to finish, and the only parallelism the runner can exploit is splitting work <em>across</em>
+        elements. That breaks down for a <strong>source</strong>, where a single "element" can stand for a
+        whole file, a Kafka partition, or an infinite stream. You cannot hand half of one fat element to
+        another worker, and you cannot persist progress halfway through reading it.
+      </p>
+      <p>
+        A <strong>Splittable DoFn</strong> makes the unit of work finer than an element. The work for one
+        element is described by a <strong>restriction</strong> — a portion of work, e.g. the offset range
+        <code>[0, N)</code>. A <strong>restriction tracker</strong> owns that restriction and gates
+        progress through <code>try_claim(position)</code>:
+      </p>
+      <ul>
+        <li><code>try_claim(pos)</code> returns <strong>True</strong> → the position is yours; do the work
+          (read/emit) and advance.</li>
+        <li><code>try_claim(pos)</code> returns <strong>False</strong> → the runner has <em>split</em> the
+          range; that position now belongs to someone else. Stop immediately and return.</li>
+      </ul>
+      <p>
+        At any time the runner may call <code>try_split(fraction)</code> on the tracker, cleaving the
+        remaining work into a <strong>primary</strong> (this worker keeps and finishes it) and a
+        <strong>residual</strong> (returned to the runner to schedule elsewhere). That single move is what
+        the diagram on the right animates.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> an SDF turns "process this element" into
+          "claim positions within a splittable restriction." Because the restriction can be split and
+          checkpointed mid-element, the runner gets <em>dynamic work rebalancing</em> and durable progress
+          for free — which is precisely why IO connectors are built on SDF.
+        </div>
+      </div>
+
+      <h2>Why this matters: three superpowers</h2>
+      <ul>
+        <li><strong>Dynamic work rebalancing.</strong> A straggler element's unclaimed tail is peeled off
+          to an idle worker mid-flight — no waiting for one slow bundle to drain.</li>
+        <li><strong>Checkpointing mid-element.</strong> A <code>try_split</code> at fraction <code>0.0</code>
+          checkpoints the residual durably, so an unbounded read can persist progress without ever
+          "finishing" the element.</li>
+        <li><strong>Bounded <em>and</em> unbounded restrictions.</strong> <code>[0, N)</code> is bounded;
+          "tail this Kafka partition forever" is the unbounded restriction <code>[offset, +∞)</code>.</li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">⚙️</span>
+        <div>
+          <strong>How IO connectors use this:</strong> <code>ReadFromText</code>, <code>ReadFromKafka</code>,
+          and PubSub readers are all SDFs. Files split by byte offset; Kafka splits by partition and
+          offset; both claim positions and report a watermark. You meet <code>KafkaIO</code> and the
+          cross-language expansion service in <a href="/docs/chapters/ch15.html">Ch 15</a>.
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <span class="ic">🧪</span>
+        <div>
+          <strong>Advanced (named, not used here):</strong> unbounded restrictions pair with a
+          <strong>watermark estimator</strong> (<code>WatermarkEstimatorProvider</code>,
+          <code>ManualWatermarkEstimator</code>) so the SDF can advance event time as it reads. Custom
+          watermark SDFs are out of scope for this lab — we keep the restriction <em>bounded</em> so the
+          job terminates and the mechanics stay clear.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>apache_beam.transforms.core.RestrictionProvider</code> — tells Beam how to make, split,
+          and size a restriction for an element (this is what makes a <code>DoFn</code> splittable).</li>
+        <li><code>apache_beam.io.restriction_trackers.OffsetRange</code> — the restriction type: a half-open
+          interval <code>[start, stop)</code> with <code>.split()</code> and <code>.size()</code>.</li>
+        <li><code>apache_beam.io.restriction_trackers.OffsetRangeTracker</code> — the matching tracker,
+          implementing <code>try_claim()</code> and <code>try_split()</code>.</li>
+        <li><code>beam.DoFn.RestrictionParam(provider)</code> — the <code>process()</code> parameter whose
+          presence upgrades the DoFn to splittable and injects a live tracker.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        A toy <em>bounded</em> SDF that "reads" the integer range <code>[0, N)</code> and emits each
+        offset. The provider models the work; the <code>process()</code> claim loop is the heart of every
+        SDF:
+      </p>
+      <pre><code class="language-python">class RangeRestrictionProvider(RestrictionProvider):
+    def initial_restriction(self, element):   # full work for element N
+        return OffsetRange(0, element)        #   -> [0, N)
+    def create_tracker(self, restriction):    # stateful claim-gate
+        return OffsetRangeTracker(restriction)
+    def restriction_size(self, element, restriction):
+        return restriction.size()             # weigh splits by # positions
+    def split(self, element, restriction):    # OPTIONAL initial fan-out
+        yield from restriction.split(desired_num_offsets_per_split=8,
+                                     min_num_offsets_per_split=1)
+
+class CountingSource(beam.DoFn):
+    def process(self, element,
+                # presence of RestrictionParam = this DoFn is splittable
+                restriction_tracker=beam.DoFn.RestrictionParam(RangeRestrictionProvider())):
+        cur = restriction_tracker.current_restriction()   # the sub-range we own
+        pos = cur.start
+        while restriction_tracker.try_claim(pos):  # True=ours, False=split away -> stop
+            yield pos                              # "read" position pos
+            pos += 1</code></pre>
+      <p>
+        Wiring it up is a normal <code>ParDo</code> — Beam recognises the <code>RestrictionParam</code> and
+        runs the SDF expansion (pair-with-restriction → split-and-size → process-sized-elements):
+      </p>
+      <pre><code class="language-python">offsets = (
+    p
+    | "TheNumberN"      >> beam.Create([known.count])   # one element: N
+    | "ReadRangeViaSDF" >> beam.ParDo(CountingSource())  # 1 element -> up to N claims
+)</code></pre>
+      <p>
+        On the portable Flink runner the SDF read is expressed as those sub-stages — open the Flink UI to
+        see <code>PairWithRestriction</code>, <code>SplitAndSize</code>, and
+        <code>ProcessSizedElementsAndRestrictions</code> in the job graph.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch14">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The claimed offsets (grouped by last
+        digit so output is deterministic) are written to
+        <code>/tmp/beam-artifact-staging/ch14-offsets*.txt</code> inside the cluster.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>One element → a splittable restriction</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart TB
+  E["element N"] --> PR["PairWithRestriction<br/>(N, [0,N))"]
+  PR --> SS["SplitAndSize"]
+  SS --> P["ProcessSized…<br/>try_claim loop"]
+  P -. "try_split → residual" .-> R["residual [cut, N)<br/>(other worker)"]
+  R --> P
+  classDef sdf fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class P sdf;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">click the bar to split off a residual</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/sdf-restriction.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 12 — Late Data, Allowed Lateness &amp; Dropped Data · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch12">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch11.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch13.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 12 — Late Data, Allowed Lateness &amp; Dropped Data</h1>
+      <p class="concept-summary">
+        A window does not close the instant the watermark passes its end. <strong>allowed_lateness</strong>
+        keeps its state alive for a grace period so stragglers still update the result — until the
+        watermark crosses <code>window_end + allowed_lateness</code>, when the state is garbage-collected
+        and any later element is <strong>dropped silently</strong>. The fix for "silent" is a metric.
+      </p>
+
+      <h2>The late-element lifecycle</h2>
+      <p>
+        In Ch 10 we learned the <strong>watermark</strong> is the runner's estimate of "event time has
+        progressed at least this far — I don't expect anything older." When the watermark passes a
+        window's end, Beam fires the <strong>ON_TIME</strong> pane. But "don't expect" is not "guarantee":
+        a slow network path or a re-delivered message can carry an event whose timestamp falls inside a
+        window the watermark has already swept past. That element is <em>late</em>.
+      </p>
+      <p>
+        What happens to a late element depends entirely on one window setting:
+      </p>
+      <ul>
+        <li><strong>Within the grace period</strong> — if the watermark has passed <code>window_end</code>
+          but not yet <code>window_end + allowed_lateness</code>, the window's persisted state still
+          exists. The late element folds in and the window fires again as a <strong>LATE</strong> pane,
+          updating the result.</li>
+        <li><strong>Beyond the grace period</strong> — once the watermark crosses
+          <code>window_end + allowed_lateness</code>, the runner <strong>garbage-collects</strong> the
+          window's state to bound memory. There is nothing left to update, so any element that arrives
+          even later is <strong>dropped</strong>. It never reaches your aggregation and emits no output.</li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> <code>allowed_lateness</code> is the price you
+          pay (in retained state) to tolerate stragglers. Bigger grace = fewer drops but more memory and
+          longer-lived windows. It is a correctness ↔ resource trade-off you set per window.
+        </div>
+      </div>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Drops are silent by default.</strong> A dropped element produces no error, no log, no
+          output — it just vanishes. If you don't <em>measure</em> it you'll never know your results are
+          quietly incomplete. Always attach a counter (below) and alert when it moves.
+        </div>
+      </div>
+
+      <h2>Reading the pane: EARLY / ON_TIME / LATE</h2>
+      <p>
+        Every firing carries a <strong>PaneInfo</strong> describing <em>why</em> it fired. Inside a DoFn
+        you read it with <code>DoFn.PaneInfoParam</code>. The fields that matter here:
+      </p>
+      <ul>
+        <li><code>pane.timing</code> — <strong>EARLY</strong> (fired before the watermark, e.g. a speculative
+          trigger), <strong>ON_TIME</strong> (the watermark just passed the window end), or
+          <strong>LATE</strong> (a late element within lateness re-fired the window).</li>
+        <li><code>pane.index</code> — <code>0</code> for the window's first firing, then <code>1, 2, …</code>
+          for each subsequent firing. A LATE pane always has a higher index than the ON_TIME pane.</li>
+        <li><code>pane.is_first</code> / <code>pane.is_last</code> — whether this is the first / final pane
+          the window will ever emit.</li>
+      </ul>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>allowed_lateness=</code> on <code>beam.WindowInto</code> — the grace period (a
+          <code>Duration</code>) during which late elements still update the window.</li>
+        <li><code>AfterWatermark(late=…)</code> — fire ON_TIME at the watermark, then once more for each
+          late element that arrives within lateness.</li>
+        <li><code>DoFn.PaneInfoParam</code> — injects the firing's <code>PaneInfo</code> (timing + index)
+          into <code>process()</code>.</li>
+        <li><code>beam.metrics.Metrics.counter(namespace, name)</code> — a worker-aggregated counter; here
+          it makes silent drops observable.</li>
+        <li><code>AccumulationMode.ACCUMULATING</code> — each LATE pane re-emits the full running total so
+          you can see the late element actually updated the result.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        One 1-minute <code>FixedWindow</code> with a 30s grace. Three on-time events form the ON_TIME pane;
+        a straggler at <code>+10s</code> re-fires it (LATE pane, sum grows); a straggler at <code>+90s</code>
+        lands past the GC horizon and is counted as dropped:
+      </p>
+      <pre><code class="language-python">windowed = (
+    p
+    | "Replay"         >> ReplayEvents(records, emission_order=emission_order)
+    | "TagLateDropped" >> beam.ParDo(TagLateAndDropped())   # counts late / dropped via Metrics
+    | "ToKV"           >> beam.Map(lambda r: (r["key"], r["amount"]))
+    | "Window" >> beam.WindowInto(
+          FixedWindows(60),                                  # tumbling 1-minute windows
+          trigger=AfterWatermark(late=AfterWatermark()),     # ON_TIME, then re-fire on each late elem
+          allowed_lateness=Duration(seconds=30),             # 30s grace before state is GC'd
+          accumulation_mode=AccumulationMode.ACCUMULATING,   # each pane re-emits the running sum
+      )
+    | "SumPerKey"  >> beam.CombinePerKey(sum)
+    | "FormatPane" >> beam.ParDo(FormatPane())               # reads DoFn.PaneInfoParam (timing+index)
+)</code></pre>
+      <p>
+        The <code>FormatPane</code> DoFn logs <code>pane.timing</code> and <code>pane.index</code> for each
+        firing, and <code>TagLateAndDropped</code> increments the <code>late_elements</code> /
+        <code>dropped_elements</code> counters that surface in the run log and the Flink UI.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch12">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log streams the submitter's output live over SSE. Watch for the <code>pane.timing=ON_TIME</code>
+        firing, then the <code>pane.timing=LATE</code> re-firing with a higher <code>pane.index</code>, and
+        the <code>dropped_elements</code> counter ticking to 1. Per-pane lines are written to
+        <code>/tmp/beam-artifact-staging/ch12-late-data*.txt</code> inside the cluster.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>The late-data gauntlet</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  E["element arrives"] --> Q{"event_time in<br/>a closed window?"}
+  Q -- "no (on time)" --> ON["ON_TIME pane"]
+  Q -- "yes" --> G{"watermark &gt;<br/>window_end + lateness?"}
+  G -- "no · within grace" --> L["LATE pane<br/>(sum updates)"]
+  G -- "yes · state GC'd" --> D["DROPPED<br/>(counter++)"]
+  classDef ok fill:#e7f6ec,stroke:#16a34a,stroke-width:2px;
+  classDef bad fill:#fdeede,stroke:#f59e0b,stroke-width:2px;
+  class L ok;
+  class D bad;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">step events through the window, grace band, and GC horizon</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/late-data.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

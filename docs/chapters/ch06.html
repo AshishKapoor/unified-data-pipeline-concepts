@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 06 — Efficient Aggregation: Combine, CombineFn, Built-ins · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch06">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch05.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch07.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 06 — Efficient Aggregation: Combine, CombineFn, Built-ins</h1>
+      <p class="concept-summary">
+        <code>Combine</code> beats <code>GroupByKey</code> + reduce because an
+        associative/commutative <strong>CombineFn</strong> lets the runner pre-aggregate
+        <em>before</em> the shuffle — moving tiny accumulators instead of every raw element.
+      </p>
+
+      <h2>Why not just GroupByKey?</h2>
+      <p>
+        In <a href="/docs/chapters/ch05.html">Chapter 5</a> we grouped a keyed
+        <code>PCollection</code> with <code>GroupByKey</code> and reduced the resulting iterable.
+        Correct — but wasteful. <code>GroupByKey</code> must ship <em>every</em> element to the
+        worker that owns its key <strong>before</strong> any reduction can happen. If a sensor emits
+        a million readings, a million readings cross the network just so you can average them.
+      </p>
+      <p>
+        <code>Combine</code> exploits a structural fact: if your reduction is
+        <strong>associative</strong> ( <code>(a∘b)∘c = a∘(b∘c)</code> ) and
+        <strong>commutative</strong> ( <code>a∘b = b∘a</code> ), it can be applied in
+        <em>any order</em> and in <em>any grouping</em> — including partially, on each worker, before
+        the shuffle. The runner reduces each bundle down to a small <strong>accumulator</strong> and
+        ships only that. This is <strong>combiner lifting</strong> (a.k.a. partial / pre-aggregation),
+        and Flink inserts the local pre-combine for you automatically.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> a <code>CombineFn</code> contracts that
+          your aggregation is associative + commutative. That single promise lets the runner split
+          the work into a cheap <em>pre-shuffle partial combine</em> and a <em>post-shuffle final
+          combine</em> — cutting data movement, often dramatically.
+        </div>
+      </div>
+
+      <h2>The 4-method CombineFn</h2>
+      <p>
+        Every <code>beam.CombineFn</code> is four methods around an <strong>accumulator</strong> —
+        an intermediate value whose size stays bounded no matter how many inputs arrive. For a mean,
+        the accumulator is a <code>(sum, count)</code> pair:
+      </p>
+      <ul>
+        <li><code>create_accumulator()</code> — return a fresh, empty accumulator (the identity element). For mean: <code>(0.0, 0)</code>.</li>
+        <li><code>add_input(acc, element)</code> — fold one input into an accumulator. <em>Runs per-element, per-bundle, before the shuffle.</em></li>
+        <li><code>merge_accumulators(accs)</code> — combine several partial accumulators into one. <em>Runs both pre-shuffle (per bundle) and post-shuffle (per key).</em></li>
+        <li><code>extract_output(acc)</code> — turn the final accumulator into the answer. For mean: <code>sum / count</code>.</li>
+      </ul>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>You cannot average averages.</strong> Carrying a bare running mean is <em>not</em>
+          associative. The fix is the accumulator shape: carry <code>(sum, count)</code> — sums and
+          counts add freely in any order — and only divide in <code>extract_output</code>. Choosing
+          the right accumulator is the whole craft of writing a <code>CombineFn</code>.
+        </div>
+      </div>
+
+      <h2>Global vs per-key, and the built-ins</h2>
+      <p>
+        The same <code>CombineFn</code> serves two shapes. <code>beam.CombineGlobally(fn)</code>
+        reduces an entire <code>PCollection</code> to a single value; <code>beam.CombinePerKey(fn)</code>
+        reduces per key on a <code>PCollection</code> of <code>(key, value)</code> pairs. Beam ships
+        a battery of ready-made combiners in <code>beam.combiners</code> so you rarely write the
+        boilerplate:
+      </p>
+      <ul>
+        <li><code>combiners.Mean.PerKey()</code> / <code>Mean.Globally()</code> — exactly the <code>(sum, count)</code> CombineFn we write by hand below.</li>
+        <li><code>combiners.Count.PerKey()</code> / <code>Count.Globally()</code> — how many elements (the WordCount aggregation from Ch 1).</li>
+        <li><code>combiners.Top.Of(n)</code> / <code>Top.PerKey(n)</code> — the <em>n</em> largest, kept in a bounded heap accumulator.</li>
+        <li><code>combiners.Sample.FixedSizeGlobally(n)</code> — a uniform reservoir sample of <em>n</em> elements.</li>
+        <li><code>beam.Distinct()</code> — deduplicate (a combine-flavoured dedup over the shuffle).</li>
+      </ul>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.CombineFn</code> — the 4-method base class: <code>create_accumulator</code>, <code>add_input</code>, <code>merge_accumulators</code>, <code>extract_output</code>.</li>
+        <li><code>beam.CombinePerKey</code> — per-key aggregation with combiner lifting.</li>
+        <li><code>beam.combiners.Mean</code> / <code>Count</code> / <code>Top</code> — built-in CombineFns.</li>
+        <li><code>beam.Values</code> — drop keys to feed a global combine.</li>
+        <li><code>beam.Flatten</code> — union the two labelled result streams to compare them.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        A hand-written <code>AverageFn</code> computes the per-sensor mean; the built-in
+        <code>Mean.PerKey()</code> computes it again on the same input to prove they agree:
+      </p>
+      <pre><code class="language-python">class AverageFn(beam.CombineFn):
+    def create_accumulator(self):            # (1) identity: (sum, count)
+        return (0.0, 0)
+
+    def add_input(self, acc, element):       # (2) fold one reading — runs pre-shuffle
+        s, c = acc
+        return (s + element, c + 1)
+
+    def merge_accumulators(self, accs):      # (3) combine partials — pre AND post shuffle
+        sums, counts = zip(*accs)
+        return (sum(sums), sum(counts))
+
+    def extract_output(self, acc):           # (4) final answer
+        s, c = acc
+        return s / c if c else float("nan")
+
+with beam.Pipeline(options=options) as p:
+    readings = p | "SensorReadings" >> beam.Create(SAMPLE_READINGS)   # (sensor_id, reading)
+
+    custom  = readings | "AverageByHand" >> beam.CombinePerKey(AverageFn())
+    builtin = readings | "AverageBuiltin" >> combiners.Mean.PerKey()   # same (sum,count) inside
+    # ... Flatten + format both paths to show identical means ...</code></pre>
+      <p>
+        In the Flink UI the <code>CombinePerKey</code> operator shows up as <em>two</em> stages — a
+        partial combine feeding the shuffle and a final combine after it. That split <em>is</em>
+        combiner lifting; watch the bytes-shuffled metric stay tiny.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch06">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The per-sensor means are written
+        to <code>/tmp/beam-artifact-staging/ch06-averages*.txt</code> inside the cluster — both paths
+        (<code>custom</code> and <code>builtin</code>) print the same number for every sensor.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Shipping raw elements vs shipping accumulators</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  subgraph GBK["GroupByKey + reduce"]
+    direction TB
+    R1["raw elements"] -->|"all N cross shuffle"| SH1(("shuffle"))
+    SH1 --> RD["reduce iterable"]
+  end
+  subgraph CMB["Combine (lifted)"]
+    direction TB
+    R2["raw elements"] --> PC["partial combine<br/>(per bundle)"]
+    PC -->|"tiny (Σ,n) cross shuffle"| SH2(("shuffle"))
+    SH2 --> FC["final combine"]
+  end
+  classDef hot fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class PC,FC hot;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">watch the bytes-shuffled counters</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/combiner-lifting.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

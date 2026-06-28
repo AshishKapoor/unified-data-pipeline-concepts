@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 15 — IO Connectors & Cross-Language · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch15">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch14.html">← prev</a>
+      <a href="/docs/chapters/ch16.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 15 — IO Connectors & Cross-Language: Files and KafkaIO</h1>
+      <p class="concept-summary">
+        Files are <strong>bounded</strong> IO; Kafka is <strong>unbounded</strong> IO. And Python
+        gets the production KafkaIO by borrowing a <strong>Java</strong> transform through the
+        <strong>cross-language expansion service</strong>.
+      </p>
+
+      <h2>Concept: bounded vs unbounded IO</h2>
+      <p>
+        Every Beam pipeline starts at a <em>source</em>. Sources come in two flavours, and the flavour
+        decides everything downstream:
+      </p>
+      <ul>
+        <li>
+          <strong>Bounded IO</strong> — a source with a known end. <code>beam.io.ReadFromText</code>
+          (from Ch 1) reads every line of a file set, emits them, then declares itself
+          <em>complete</em>. The watermark advances to <code>+∞</code> and the job terminates. Batch.
+        </li>
+        <li>
+          <strong>Unbounded IO</strong> — a source that never declares completion. A Kafka topic is an
+          endless append-only log, so <code>KafkaIO</code> is a <em>streaming</em> source: it advances
+          a watermark forever and the job keeps running until you cancel it. This is why this chapter
+          is <code>streaming=True</code>.
+        </li>
+      </ul>
+      <p>
+        TextIO is pure Python and "just works". KafkaIO is the interesting case, and the reason is not
+        about Kafka at all — it is about <em>languages</em>.
+      </p>
+
+      <h2>Concept: KafkaIO is a Java transform</h2>
+      <p>
+        There is no production-grade native-Python KafkaIO. The mature, exactly-once KafkaIO lives in
+        the <strong>Java</strong> SDK. Rather than reimplement it, Beam lets the Python SDK
+        <em>reuse</em> the Java transform through its <strong>cross-language (xlang)</strong>
+        framework. The Python <code>ReadFromKafka</code> / <code>WriteToKafka</code> you import are
+        thin stubs that drive a Java <strong>expansion service</strong> behind the scenes.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> a transform can be implemented in a
+          <em>different language</em> than the pipeline that uses it. At construction time Python asks a
+          Java expansion service to <em>expand</em> KafkaIO; at runtime a Java harness and a Python
+          harness run <em>side by side</em>, exchanging records over the Fn API.
+        </div>
+      </div>
+
+      <h3>Construction time: the expansion handshake</h3>
+      <p>
+        When you call <code>ReadFromKafka(...)</code>, the Python SDK opens a gRPC connection to the
+        expansion service — by default the one bundled in the Beam Flink <strong>job server</strong>
+        on port <strong>8097</strong>. It sends the transform's URN and parameters; the service
+        <em>expands</em> KafkaIO into a real Java sub-graph and returns it as a proto. Python splices
+        that Java sub-graph into the pipeline it is building. Your single Python file now contains
+        edges that are <em>defined</em> in Java.
+      </p>
+
+      <h3>Runtime: two harnesses, one job</h3>
+      <p>
+        At execution, the portable runner starts <strong>two</strong> SDK harnesses for this one job:
+        a <strong>Java</strong> harness that runs the Kafka read/write, and a <strong>Python</strong>
+        harness that runs your <code>CombinePerKey</code> and <code>Map</code> DoFns. Records cross the
+        language boundary over the <strong>Fn API</strong> (a gRPC data plane). You wrote Python, but
+        the Kafka edges execute as Java.
+      </p>
+
+      <div class="callout warn">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>This chapter requires Kafka.</strong> Before running, bring up the broker overlay and
+          seed the topics:
+          <pre><code class="language-bash">./scripts/up-kafka.sh      # start the Kafka broker
+./scripts/seed-kafka.sh    # create clicks-in / counts-out, produce sample clicks</code></pre>
+          <strong>Brokers must be reached at <code>kafka:29092</code></strong> (the in-network
+          listener), <em>not</em> <code>localhost:9092</code>. The SDK harnesses run <em>inside</em>
+          the cluster network; <code>localhost:9092</code> only works from your laptop.
+        </div>
+      </div>
+
+      <div class="callout gotcha">
+        <span class="ic">🧱</span>
+        <div>
+          <strong>Bytes in, bytes out.</strong> <code>ReadFromKafka</code> yields
+          <code>(key_bytes, value_bytes)</code> and <code>WriteToKafka</code> expects
+          <code>(bytes, bytes)</code> — it does not serialize Python objects for you. Decode on the way
+          in, encode on the way out.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.io.ReadFromText</code> / <code>WriteToText</code> — bounded file IO (Ch 1 recap).</li>
+        <li><code>apache_beam.io.kafka.ReadFromKafka</code> — unbounded Kafka source (Java, via xlang).</li>
+        <li><code>apache_beam.io.kafka.WriteToKafka</code> — Kafka sink (Java, via xlang).</li>
+        <li><code>expansion_service=</code> — the <code>host:port</code> of the Java expansion service (<code>:8097</code>).</li>
+        <li><code>consumer_config</code> / <code>producer_config</code> — passed straight to the Kafka client; set <code>bootstrap.servers</code> here.</li>
+        <li><code>beam.window.FixedWindows</code> + <code>CombinePerKey</code> — windowed aggregation over an unbounded stream.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        Read clicks from <code>clicks-in</code>, count clicks per user in 10-second windows, and write
+        the counts back to <code>counts-out</code>. The Kafka edges are Java; the middle is Python:
+      </p>
+      <pre><code class="language-python">with beam.Pipeline(options=options) as p:        # streaming=True
+    counts = (
+        p
+        # JAVA transform, expanded via the cross-language service on :8097
+        | "ReadFromKafka" >> ReadFromKafka(
+            consumer_config={
+                "bootstrap.servers": kafka_bootstrap(),  # kafka:29092 (in-network!)
+                "auto.offset.reset": "earliest",
+            },
+            topics=["clicks-in"],
+            expansion_service="localhost:8097",
+        )
+        # --- the PYTHON harness runs everything below ---
+        | "ToUserOne"   >> beam.Map(to_user_one)             # (k,v) bytes -> (user, 1)
+        | "Window"      >> beam.WindowInto(beam.window.FixedWindows(10))
+        | "CountPerUser">> beam.CombinePerKey(sum)           # clicks per user per window
+        | "Encode"      >> beam.Map(encode_result)           # (user, n) -> (bytes, bytes)
+    )
+    # JAVA transform again: write per-window counts back to Kafka
+    counts | "WriteToKafka" >> WriteToKafka(
+        producer_config={"bootstrap.servers": kafka_bootstrap()},
+        topic="counts-out",
+        expansion_service="localhost:8097",
+    )</code></pre>
+      <p>
+        The submitter ships this mixed-language graph to the Beam Flink Job Server. The expansion of
+        KafkaIO happens during construction; at runtime the Flink JobManager schedules both the Java
+        and Python harnesses. Open the Flink UI to watch the (never-ending) streaming job.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch15">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log streams the submitter's output live over SSE. This is an <strong>unbounded</strong>
+        job — it runs until you hit <strong>Cancel</strong>. Per-user counts land on the
+        <code>counts-out</code> topic; consume it with
+        <code>kafka-console-consumer --topic counts-out --from-beginning --property print.key=true</code>.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Python ↔ Java cross-language flow</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">sequenceDiagram
+  participant Py as Python SDK
+  participant ES as Expansion Service :8097
+  participant JR as Java harness (KafkaIO)
+  participant PH as Python harness
+  Note over Py,ES: construction time
+  Py->>ES: expand ReadFromKafka (URN + params)
+  ES-->>Py: expanded Java transform (proto)
+  Note over Py: splice Java sub-graph into pipeline
+  Note over JR,PH: runtime
+  JR->>JR: read clicks-in (Kafka)
+  JR-->>PH: (k,v) bytes over Fn API
+  PH->>PH: window + CombinePerKey
+  PH-->>JR: (user, count) bytes
+  JR->>JR: write counts-out (Kafka)</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">construction handshake → runtime record flow</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/xlang-sequence.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

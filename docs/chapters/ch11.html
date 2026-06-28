@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 11 — Triggers &amp; Accumulation Modes · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch11">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch10.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch12.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 11 — Triggers &amp; Accumulation Modes</h1>
+      <p class="concept-summary">
+        A window says <em>which</em> events group together; the watermark says <em>when they're
+        probably all in</em>. The <strong>trigger</strong> is the third leg: it decides
+        <strong>WHEN a window emits</strong> — and a window can emit many times, producing a
+        sequence of <strong>panes</strong>. The <strong>accumulation mode</strong> decides how those
+        panes relate: each one a running total, or each one only the new delta.
+      </p>
+
+      <h2>Concept</h2>
+      <p>
+        In Ch 9 we put events into windows; in Ch 10 the watermark estimated event-time completeness.
+        But a window still needs a rule for <em>pulling the trigger</em> — actually materializing a
+        result. That rule is the <strong>trigger</strong>. Crucially, a window is not limited to one
+        output: a single window can fire repeatedly, each firing emitting a <strong>pane</strong>.
+      </p>
+      <p>
+        The default and most useful skeleton is <code>AfterWatermark</code>, which lets you attach
+        three kinds of firing:
+      </p>
+      <ul>
+        <li>
+          <strong>early</strong> (<code>early=</code>) — <em>speculative</em> panes that fire
+          <em>before</em> the watermark reaches the window's end, so a dashboard isn't blank while
+          data trickles in. Driven by <code>AfterProcessingTime(n)</code> (every n seconds of wall
+          clock) or <code>AfterCount(n)</code> (every n elements).
+        </li>
+        <li>
+          <strong>on-time</strong> — exactly one pane, fired when the watermark crosses the end of
+          the window. This is the "the data is probably all here now" result.
+        </li>
+        <li>
+          <strong>late</strong> (<code>late=</code>) — panes fired <em>after</em> the on-time pane,
+          for elements that arrive late but still within <code>allowed_lateness</code> (Ch 12).
+          <code>AfterCount(1)</code> means "re-fire on every late element".
+        </li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> the <em>trigger</em> answers WHEN, and the
+          <em>accumulation mode</em> answers HOW the panes combine. Change the mode alone — same
+          window, same trigger, same data — and every pane value changes.
+        </div>
+      </div>
+
+      <h3>Accumulation: ACCUMULATING vs DISCARDING</h3>
+      <p>
+        When a window fires more than once, what does each pane contain? That's the
+        <code>accumulation_mode</code>:
+      </p>
+      <ul>
+        <li>
+          <strong>ACCUMULATING</strong> — each pane re-emits the running total including
+          <em>all</em> data seen so far. Successive panes grow monotonically:
+          <code>3 → 7 → 12 → …</code>. Use when the sink <em>overwrites</em> by key (an upsert /
+          last-write-wins dashboard).
+        </li>
+        <li>
+          <strong>DISCARDING</strong> — the runner clears the window's accumulated state after each
+          firing, so each pane carries only the <em>delta</em> since the last pane:
+          <code>3 → 4 → 5 → …</code>. Use when the sink <em>adds</em> (you sum the panes downstream).
+        </li>
+      </ul>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Double-counting trap:</strong> pick the mode that matches your sink. ACCUMULATING
+          panes into an <em>additive</em> sink double-counts everything; DISCARDING panes into an
+          <em>overwriting</em> sink throws away earlier deltas. The numbers in the right-hand
+          animation show exactly how the two diverge from the same firings.
+        </div>
+      </div>
+
+      <h3>Composing triggers</h3>
+      <p>
+        Beyond <code>AfterWatermark</code> you can build richer rules: <code>Repeatedly</code> (run a
+        sub-trigger forever), <code>AfterAny</code> / <code>AfterAll</code> (fire when any / all of
+        several sub-triggers are ready), and <code>AfterEach</code> (advance through sub-triggers in
+        sequence). <code>AfterWatermark(early=…, late=…)</code> is itself sugar over these.
+      </p>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>AfterWatermark(early=…, late=…)</code> — the early / on-time / late firing skeleton.</li>
+        <li><code>AfterProcessingTime(n)</code> — fire every n seconds of processing (wall-clock) time.</li>
+        <li><code>AfterCount(n)</code> — fire after n elements have accumulated.</li>
+        <li><code>Repeatedly</code>, <code>AfterAny</code>, <code>AfterAll</code>, <code>AfterEach</code> — trigger combinators.</li>
+        <li><code>AccumulationMode.ACCUMULATING</code> / <code>DISCARDING</code> — how successive panes relate.</li>
+        <li><code>beam.DoFn.PaneInfoParam</code> — per-pane metadata (timing, index, is_first/is_last).</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        One windowed sum, run twice with the <em>same</em> trigger but different accumulation modes,
+        so you can read cumulative-vs-delta side by side. The streaming source injects event-time lag
+        so the watermark trails and early panes get a chance to fire:
+      </p>
+      <pre><code class="language-python">trigger = AfterWatermark(
+    early=AfterProcessingTime(10),  # speculative early panes every 10s
+    late=AfterCount(1),             # one extra pane per late element
+)
+
+def windowed_sum(events, *, accumulation_mode, mode_label):
+    return (
+        events
+        | f"ToKV-{mode_label}"  >> beam.Map(lambda e: (e["key"], e["value"]))
+        | f"Window-{mode_label}" >> beam.WindowInto(
+            FixedWindows(30),
+            trigger=trigger,
+            accumulation_mode=accumulation_mode,   # the ONLY thing that differs
+            allowed_lateness=60,
+        )
+        | f"SumPerKey-{mode_label}" >> beam.CombinePerKey(sum)
+        | f"LogPane-{mode_label}"   >> beam.ParDo(LogPane(mode_label))  # logs PaneInfo
+    )
+
+windowed_sum(events, accumulation_mode=AccumulationMode.ACCUMULATING, mode_label="ACCUMULATING")
+windowed_sum(events, accumulation_mode=AccumulationMode.DISCARDING,  mode_label="DISCARDING")</code></pre>
+      <p>
+        <code>LogPane</code> reads <code>DoFn.PaneInfoParam</code> and prints the firing class —
+        <code>EARLY</code> / <code>ON_TIME</code> / <code>LATE</code> — plus the pane index and
+        whether it is the first/last pane. Watch the two branches in the Flink TaskManager logs and
+        compare the value streams: ACCUMULATING climbs; DISCARDING resets after every pane.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch11">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The per-pane lines
+        (<code>EARLY</code>/<code>ON_TIME</code>/<code>LATE</code> with their values) are emitted
+        worker-side, so they appear in the Flink TaskManager logs — open the Flink UI to follow the
+        firings as the watermark advances.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>One window, many panes</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  E["events<br/>(event-time)"] --> W["FixedWindows(30)"]
+  W --> T{"AfterWatermark"}
+  T -->|"early: AfterProcessingTime(10)"| EP["EARLY pane(s)"]
+  T -->|"watermark crosses end"| OP["ON_TIME pane"]
+  T -->|"late: AfterCount(1)"| LP["LATE pane(s)"]
+  EP --> A["accumulation_mode<br/>ACCUMULATING vs DISCARDING"]
+  OP --> A
+  LP --> A
+  classDef on fill:#dff5e6,stroke:#16a34a,stroke-width:2px;
+  class OP on;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">click the toggle to switch accumulation mode</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/triggers-panes.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

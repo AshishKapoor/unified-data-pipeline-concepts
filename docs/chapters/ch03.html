@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 03 — Element-wise Transforms &amp; the DoFn Lifecycle · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch03">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch02.html">← prev</a>
+      <a href="/docs/chapters/ch04.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 03 — Element-wise Transforms &amp; the DoFn Lifecycle</h1>
+      <p class="concept-summary">
+        <code>Map</code>, <code>FlatMap</code> and <code>Filter</code> are <strong>sugar</strong> over
+        one primitive — <code>ParDo</code> + a <code>DoFn</code>. The runner drives every DoFn through
+        a fixed lifecycle, and a <strong>bundle</strong> is its unit of commit and retry.
+      </p>
+
+      <h2>Concept</h2>
+      <p>
+        Almost every element-wise transform you write reduces to a single primitive: <code>beam.ParDo</code>
+        applied to a <code>DoFn</code>. The friendlier transforms are just thin wrappers:
+      </p>
+      <ul>
+        <li><code>beam.Map(fn)</code> — a <strong>1 → 1</strong> ParDo (each input yields exactly one output).</li>
+        <li><code>beam.FlatMap(fn)</code> — a <strong>1 → N</strong> ParDo (each input yields an iterable, flattened).</li>
+        <li><code>beam.Filter(pred)</code> — a <strong>keep-or-drop</strong> ParDo (yields the element, or nothing).</li>
+      </ul>
+      <p>
+        Reach for <code>ParDo(DoFn)</code> directly when you need more than a pure function: setup of an
+        expensive client, per-batch buffering, multiple outputs, access to the element's timestamp or
+        window, or state &amp; timers (Ch 13). The DoFn is the general case; the rest are conveniences.
+      </p>
+
+      <h3>The lifecycle the runner guarantees</h3>
+      <p>
+        The runner does not just call <code>process</code>. It drives each DoFn instance through an
+        ordered set of callbacks. Internalising this ordering is what separates correct element-wise
+        code from subtly broken code:
+      </p>
+      <pre><code class="language-text">setup()                 once per instance     → open reusable resources (clients, sessions)
+  start_bundle()        once per bundle        → init per-bundle state / buffers
+    process(elem)       once per element       → the work; yields 0..N outputs
+    process(elem)       ...
+  finish_bundle()       once per bundle        → flush the batch (commit-tied)
+teardown()              once per instance      → close resources (BEST-EFFORT, may not run)</code></pre>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> a <strong>bundle</strong> is the runner's unit
+          of <em>commit and retry</em>. The runner — not your code — decides how the element stream is
+          sliced into bundles. On Flink, bundle boundaries track checkpoints and network buffers; they
+          have nothing to do with the shape of your <code>Create</code> list.
+        </div>
+      </div>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Idempotency is non-negotiable.</strong> If any element in a bundle fails, the
+          <em>entire bundle</em> is replayed from <code>start_bundle</code>. So <code>process</code> must
+          be safe to re-run: prefer keyed/upsert writes over blind inserts, and never mutate global
+          counters that would double-count on retry.
+        </div>
+      </div>
+
+      <div class="callout gotcha">
+        <span class="ic">🧹</span>
+        <div>
+          <strong><code>teardown</code> is best-effort.</strong> A hard worker crash can skip it entirely.
+          Use it only for resource hygiene (closing a client). Anything that must <em>not</em> be lost —
+          flushing a batch of writes — belongs in <code>finish_bundle</code>, which runs on the bundle's
+          commit path.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.ParDo</code> — the element-wise primitive that drives a DoFn.</li>
+        <li><code>beam.DoFn</code> — subclass and override the lifecycle methods.</li>
+        <li><code>setup</code> / <code>start_bundle</code> / <code>process</code> / <code>finish_bundle</code> / <code>teardown</code> — the lifecycle callbacks.</li>
+        <li><code>DoFn.TimestampParam</code> — ask the runner to inject each element's event timestamp into <code>process</code>.</li>
+        <li><code>beam.Filter</code> / <code>beam.Map</code> — the sugar transforms, shown alongside the raw ParDo.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        A <code>LifecycleDoFn</code> logs every callback as it fires, so the worker logs reveal bundle
+        boundaries directly. It opens a fake client in <code>setup</code>, buffers per bundle, and flushes
+        in <code>finish_bundle</code>. We feed it ~20 <code>Create</code>'d records:
+      </p>
+      <pre><code class="language-python">class LifecycleDoFn(beam.DoFn):
+    def setup(self):                      # once per instance — open reusable resources
+        self._client = FakeClient(worker_tag=f"pid{os.getpid()}")
+        self._bundle_no = 0
+
+    def start_bundle(self):               # once per bundle — reset per-bundle buffer
+        self._bundle_no += 1
+        self._buffer = []
+
+    def process(self, element, timestamp=beam.DoFn.TimestampParam):
+        enriched = self._client.enrich(element)
+        self._buffer.append(enriched)     # batch now…
+        yield enriched                    # 1→1 here, but a DoFn may yield 0..N
+
+    def finish_bundle(self):              # once per bundle — flush (commit-tied)
+        log.info("flush bundle #%d: %d records", self._bundle_no, len(self._buffer))
+
+    def teardown(self):                   # best-effort — close, never flush
+        self._client.close()
+
+with beam.Pipeline(options=options) as p:
+    (p
+     | "CreateRecords" >> beam.Create(records)               # ~20 bounded records
+     | "DropDates"     >> beam.Filter(lambda r: r["fruit"] != "date")   # Filter = sugar
+     | "Lifecycle"     >> beam.ParDo(LifecycleDoFn())        # the general primitive
+     | "Format"        >> beam.Map(lambda r: f"id={r['id']} …"))        # Map = sugar</code></pre>
+      <p>
+        Bundle-by-bundle narration lands in the <strong>TaskManager</strong> logs (the DoFn runs in the
+        SDK worker harness, not the submitter). The submitter stream below shows the messages emitted from
+        <code>run()</code> itself — submit, then finish.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch03">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. To read the per-bundle lifecycle
+        trace, open the Flink UI → TaskManager → Logs while the job <code>ch03-&lt;runId&gt;</code> runs.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>The DoFn lifecycle, bundle by bundle</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">stateDiagram-v2
+  [*] --> setup
+  setup --> start_bundle : per instance
+  state "per bundle" as Bundle {
+    start_bundle --> process
+    process --> process : next element
+    process --> finish_bundle : last element
+  }
+  finish_bundle --> start_bundle : next bundle
+  finish_bundle --> teardown : no more bundles
+  teardown --> [*] : best-effort</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">click a node to jump to a callback</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/dofn-lifecycle.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

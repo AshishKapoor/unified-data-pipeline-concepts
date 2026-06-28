@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 09 — Windowing: Fixed, Sliding, Sessions, Global · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch09">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/chapters/ch08.html">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch10.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 09 — Windowing: Fixed, Sliding, Sessions, Global</h1>
+      <p class="concept-summary">
+        A window is a <strong>per-element tag</strong>. <code>WindowInto</code> runs each element's
+        event timestamp through a <code>WindowFn</code> that assigns it to one <em>or more</em>
+        windows — and grouping is always <strong>per key, per window</strong>.
+      </p>
+
+      <h2>Concept</h2>
+      <p>
+        Aggregating an <em>unbounded</em> stream is impossible without slicing time into finite
+        chunks — you can never wait for "all" the data. Windowing is that slicing. Crucially, it is
+        not itself an aggregation: <code>beam.WindowInto(fn)</code> simply decorates every element
+        with the window(s) it belongs to, by running the element's <strong>event timestamp</strong>
+        (assigned upstream, Ch 8) through a <code>WindowFn</code>. The grouping happens later, in a
+        <code>GroupByKey</code>/<code>CombinePerKey</code>, which produces exactly one output per
+        <strong>(key, window)</strong> pair.
+      </p>
+      <p>
+        Because windowing keys off <em>event</em> time, arrival order is irrelevant: a deliberately
+        shuffled, out-of-order stream produces identical windows. That is why this chapter replays
+        the <em>same</em> event log through four different <code>WindowFn</code>s and only the
+        window assignment changes.
+      </p>
+
+      <h3>The four window functions</h3>
+      <ul>
+        <li>
+          <strong>FixedWindows(60)</strong> — <em>tumbling</em>: contiguous, non-overlapping 60s
+          buckets aligned to the epoch (<code>[0,60)</code>, <code>[60,120)</code>, …). Each element
+          lands in exactly <strong>one</strong> window.
+        </li>
+        <li>
+          <strong>SlidingWindows(60, 30)</strong> — <em>overlapping</em>: each window is 60s wide and
+          a new one starts every 30s, so every element lands in <strong>two</strong> windows
+          (size / period = 2). Use it for rolling/moving aggregates ("last 60s, updated every 30s").
+        </li>
+        <li>
+          <strong>Sessions(gap_size=45)</strong> — <em>data-driven</em> and <strong>merging</strong>:
+          each element seeds a window <code>[t, t+gap)</code>; windows that touch or overlap are
+          <em>merged</em> during grouping. A burst of activity spaced under 45s collapses into one
+          session; a quiet stretch of ≥ 45s starts a fresh one. The window bounds depend on the
+          <em>data</em>, not the clock.
+        </li>
+        <li>
+          <strong>GlobalWindows()</strong> — a single window spanning all of time. It is the
+          <em>default</em> for batch; for unbounded data it never closes, so it is useless for
+          aggregation unless paired with a trigger (Ch 11).
+        </li>
+      </ul>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> windowing is an orthogonal knob. The
+          pipeline shape — window → pair-with-one → count-per-key → log — is byte-for-byte identical
+          across all four; only the <code>WindowFn</code> argument to <code>WindowInto</code> differs.
+        </div>
+      </div>
+
+      <div class="callout gotcha">
+        <span class="ic">⚠️</span>
+        <div>
+          <strong>Merging is per key.</strong> Sessions merge windows independently for each key —
+          <code>sensor-0</code> and <code>sensor-1</code> can have completely different session
+          boundaries from the very same stream. Merging WindowFns also can't be used as a
+          <code>GroupByKey</code> input more than once without re-windowing.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>beam.WindowInto(window_fn)</code> — assigns each element to its window(s).</li>
+        <li><code>window.FixedWindows(size)</code> — tumbling, non-overlapping buckets.</li>
+        <li><code>window.SlidingWindows(size, period)</code> — overlapping rolling windows.</li>
+        <li><code>window.Sessions(gap_size)</code> — data-driven, merging windows.</li>
+        <li><code>window.GlobalWindows()</code> — the single all-of-time window (batch default).</li>
+        <li><code>DoFn.WindowParam</code> — injects the current window so you can log/inspect it.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>
+        One replayed, out-of-order stream; the same four-step branch applied with three different
+        <code>WindowFn</code>s. <code>DoFn.WindowParam</code> logs which window each per-key count fell in:
+      </p>
+      <pre><code class="language-python">def count_per_key(events, window_fn, label):
+    return (
+        events
+        | f"Window/{label}" >> beam.WindowInto(window_fn)      # tag each element with its window(s)
+        | f"Pair/{label}"   >> beam.Map(lambda e: (e["key"], 1))
+        | f"Count/{label}"  >> combiners.Count.PerKey()        # one (key,count) per (key, window)
+        | f"Log/{label}"    >> beam.ParDo(LogPerKeyWindow(label))
+    )
+
+with beam.Pipeline(options=options) as p:                       # streaming=True
+    events = p | "Replay" >> ReplayEvents(RAW_EVENTS, emission_order=EMISSION_ORDER)
+    count_per_key(events, FixedWindows(60),            "FIXED")
+    count_per_key(events, SlidingWindows(size=60, period=30), "SLIDING")
+    count_per_key(events, Sessions(gap_size=45),       "SESSION")
+    count_per_key(events, GlobalWindows(),             "GLOBAL")</code></pre>
+      <p>
+        <code>LogPerKeyWindow</code> reads <code>window.start</code>/<code>window.end</code> via
+        <code>DoFn.WindowParam</code> and logs lines like
+        <code>[FIXED] window=[60,120) key=sensor-0 count=3</code>. Compare the
+        <code>[FIXED]</code>/<code>[SLIDING]</code>/<code>[SESSION]</code>/<code>[GLOBAL]</code> lines
+        for the same key to see the assignment difference directly.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🪵</span>
+        <div>
+          Worker-side <code>logging</code> lands in the <strong>TaskManager</strong> logs (visible in
+          the Flink UI or <code>docker logs</code>), not the submitter's stdout — that's expected for
+          the portable runner. The SSE log below shows the <em>submitter's</em> output.
+        </div>
+      </div>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch09">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. This is a streaming job
+        (<code>--streaming</code>) over a finite replayed source, so it terminates once the replay
+        drains; the per-window counts appear in the TaskManager logs as shown above.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>Same events, four window functions</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  E["event @ t<br/>(event time)"] --> WF{{"WindowFn"}}
+  WF -->|FixedWindows| F["one [s,s+60) bucket"]
+  WF -->|SlidingWindows| SL["two overlapping<br/>[s,s+60) windows"]
+  WF -->|Sessions| SE["[t,t+gap) · merges<br/>across gaps &lt; 45s"]
+  WF -->|GlobalWindows| G["one all-of-time<br/>window"]
+  classDef merge fill:#fde7ec,stroke:#e6526f,stroke-width:2px;
+  class SE merge;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">click a mode to pin the WindowFn</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/windowing.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

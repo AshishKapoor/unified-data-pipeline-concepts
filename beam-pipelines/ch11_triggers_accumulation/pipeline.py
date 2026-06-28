@@ -52,7 +52,6 @@ import os
 import sys
 
 import apache_beam as beam
-from apache_beam.transforms import trigger as trig
 from apache_beam.transforms.trigger import (
     AccumulationMode,
     AfterCount,
@@ -60,6 +59,15 @@ from apache_beam.transforms.trigger import (
     AfterWatermark,
 )
 from apache_beam.transforms.window import FixedWindows
+from apache_beam.utils.windowed_value import PaneInfoTiming
+
+# Human-readable names for the integer pane-timing enum (EARLY / ON_TIME / LATE / UNKNOWN).
+_TIMING_NAMES = {
+    PaneInfoTiming.EARLY: "EARLY",
+    PaneInfoTiming.ON_TIME: "ON_TIME",
+    PaneInfoTiming.LATE: "LATE",
+    PaneInfoTiming.UNKNOWN: "UNKNOWN",
+}
 
 # Make the shared _common package importable regardless of CWD.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,7 +115,7 @@ class LogPane(beam.DoFn):
     ):
         key, total = kv
         # Map the integer timing enum to a readable tag (EARLY / ON_TIME / LATE / UNKNOWN).
-        timing = trig.PaneInfoTiming.to_string(pane.timing)
+        timing = _TIMING_NAMES.get(pane.timing, str(pane.timing))
         window_end = float(window.end)  # window end as a unix-seconds float
         msg = (
             f"[{self._mode:>11}] key={key} window_end={window_end:.0f} "
