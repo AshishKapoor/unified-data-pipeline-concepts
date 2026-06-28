@@ -1,0 +1,28 @@
+# Node / NestJS
+node_modules/
+dist/
+*.log
+npm-debug.log*
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Beam / pipeline outputs
+beam-pipelines/**/output*
+beam-pipelines/**/*.out
+/tmp/beam-artifact-staging/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts copied into the API image
+nestjs-app/public/docs/

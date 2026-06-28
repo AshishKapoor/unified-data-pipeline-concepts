@@ -1,0 +1,6 @@
+Apache Beam is a unified model for defining both batch and streaming data parallel processing pipelines.
+A pipeline written once can run on many runners such as the Direct runner the Flink runner and the Dataflow runner.
+Batch is simply a bounded special case of streaming.
+The streaming model answers four questions what results where in event time when in processing time and how results relate.
+Windowing watermarks triggers and accumulation modes are the heart of the streaming model.
+Beam equals Batch plus strEAM.

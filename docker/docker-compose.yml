@@ -1,0 +1,154 @@
+# unified-data-pipeline-concepts — CORE stack
+# Beam 2.74.0 (Python 3.11) on Flink 1.19 via the Portability framework (EXTERNAL worker pool).
+#
+# Bring up:   docker compose -f docker/docker-compose.yml up -d   (or ./scripts/up.sh)
+# Flink UI:   http://localhost:8081      NestJS docs: http://localhost:3000/docs
+#
+# THE GOLDEN RULE: submitter Python, worker pool, and job server are all Beam 2.74.0 / Python 3.11,
+# and the Flink cluster minor (1.19) equals the job-server's Flink minor. Do not mix versions.
+name: unified-data-pipeline-concepts
+
+services:
+
+  # 1) Flink JobManager — REST/UI on 8081, RPC endpoint for taskmanagers.
+  jobmanager:
+    image: flink:1.19
+    command: jobmanager
+    ports:
+      - "8081:8081" # Flink Web UI + REST API
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: jobmanager
+        rest.bind-address: 0.0.0.0
+        parallelism.default: 2
+        state.backend.type: hashmap
+        execution.checkpointing.interval: 10000
+        execution.checkpointing.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.savepoint-dir: file:///tmp/flink-savepoints
+    volumes:
+      - beam-artifacts:/tmp/beam-artifact-staging
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - flink-savepoints:/tmp/flink-savepoints
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # 2) Flink TaskManager — runs operators. MUST reach the SDK worker pool at localhost:50000,
+  #    which works because beam-worker-pool shares THIS container's network namespace (see #4).
+  taskmanager:
+    image: flink:1.19
+    command: taskmanager
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        taskmanager.bind-host: 0.0.0.0
+        taskmanager.host: taskmanager
+        parallelism.default: 2
+        state.backend.type: hashmap
+        execution.checkpointing.dir: file:///tmp/flink-checkpoints
+    volumes:
+      - beam-artifacts:/tmp/beam-artifact-staging
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - flink-savepoints:/tmp/flink-savepoints
+
+  # 3) Beam Flink Job Server — translates the portable Beam pipeline proto into a Flink JobGraph
+  #    and submits it to the JobManager. Exposes JobService / Artifact / Expansion endpoints.
+  beam-job-server:
+    image: apache/beam_flink1.19_job_server:2.74.0
+    command: >
+      --flink-master=jobmanager:8081
+      --job-host=0.0.0.0
+      --job-port=8099
+      --artifact-port=8098
+      --expansion-port=8097
+    ports:
+      - "8099:8099" # JobService       -> --job_endpoint
+      - "8098:8098" # ArtifactStaging  -> --artifact_endpoint
+      - "8097:8097" # ExpansionService -> cross-language (Ch 15)
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    volumes:
+      - beam-artifacts:/tmp/beam-artifact-staging
+
+  # 4) Python SDK worker pool — the EXTERNAL harness that runs user DoFns.
+  #    MAKE-OR-BREAK: network_mode "service:taskmanager" puts this in the TaskManager's network
+  #    namespace, so the SDK control endpoint resolves to localhost:50000 INSIDE the TaskManager.
+  #    Do NOT add a `ports:` block here — it conflicts with shared networking.
+  beam-worker-pool:
+    image: apache/beam_python3.11_sdk:2.74.0
+    command: --worker_pool
+    network_mode: "service:taskmanager"
+    depends_on:
+      - taskmanager
+    volumes:
+      - beam-artifacts:/tmp/beam-artifact-staging
+
+  # 5) NestJS orchestration API (control plane). Serves the interactive docs + REST/SSE API.
+  api:
+    build:
+      context: ../nestjs-app
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - FLINK_REST_URL=http://jobmanager:8081
+      - BEAM_JOB_ENDPOINT=beam-job-server:8099
+      - BEAM_ARTIFACT_ENDPOINT=beam-job-server:8098
+      - BEAM_ENVIRONMENT_TYPE=EXTERNAL
+      - BEAM_ENVIRONMENT_CONFIG=localhost:50000
+      # How the API launches pipelines: it runs `docker compose exec submitter python ...`.
+      - SUBMITTER_SERVICE=submitter
+      - COMPOSE_PROJECT=unified-data-pipeline-concepts
+      - PIPELINES_DIR=/pipelines
+      # The interactive HTML course, served at /docs (mounted ro so it is editable without rebuild).
+      - DOCS_ROOT=/docs-site
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      beam-job-server:
+        condition: service_started
+    volumes:
+      - ../beam-pipelines:/pipelines:ro
+      - ../docs:/docs-site:ro
+      # Mounted so the API can `docker compose exec` the submitter container.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # 6) Python submitter — long-running idle container the API execs `python <pipeline>.py` into.
+  #    Holds apache-beam==2.74.0 on Python 3.11. Submits via PortableRunner to beam-job-server.
+  submitter:
+    build:
+      context: ../beam-pipelines
+      dockerfile: Dockerfile.submitter
+    command: ["tail", "-f", "/dev/null"]
+    working_dir: /pipelines
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BEAM_JOB_ENDPOINT=beam-job-server:8099
+      - BEAM_ARTIFACT_ENDPOINT=beam-job-server:8098
+      - BEAM_ENVIRONMENT_TYPE=EXTERNAL
+      - BEAM_ENVIRONMENT_CONFIG=localhost:50000
+      # Ch 15 uses this in-network broker listener (NOT localhost:9092, which is host-only).
+      - KAFKA_BOOTSTRAP=kafka:29092
+    volumes:
+      - ../beam-pipelines:/pipelines
+      - beam-artifacts:/tmp/beam-artifact-staging
+    depends_on:
+      beam-job-server:
+        condition: service_started
+
+volumes:
+  beam-artifacts:
+  flink-checkpoints:
+  flink-savepoints:

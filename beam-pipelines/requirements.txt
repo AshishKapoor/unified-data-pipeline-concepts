@@ -1,0 +1,4 @@
+# THE GOLDEN RULE: this must equal the job-server and SDK-worker-pool Beam version (2.74.0).
+# [gcp] pulls common IO extras; KafkaIO (Ch 15) is cross-language and uses the job server's
+# expansion service, so no extra pip dependency is required for it here.
+apache-beam[gcp]==2.74.0

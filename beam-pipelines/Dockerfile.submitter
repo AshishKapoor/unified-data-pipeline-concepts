@@ -1,0 +1,19 @@
+# Submitter image — a thin, long-running container the NestJS API execs `python pipeline.py` into.
+# It holds the Beam SDK that constructs the pipeline and ships it to the Beam Flink Job Server.
+# CPython MUST be 3.11 to match the SDK worker pool harness (apache/beam_python3.11_sdk:2.74.0).
+FROM python:3.11-slim
+
+# Java is only needed by the cross-language expansion path (Ch 15). It is cheap to include and
+# keeps the submitter capable of bootstrapping the default expansion service if ever needed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends default-jre-headless curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /pipelines
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+ENV PYTHONUNBUFFERED=1
+# Default to idle; the NestJS API runs `docker compose exec submitter python <pipeline>.py ...`.
+CMD ["tail", "-f", "/dev/null"]
