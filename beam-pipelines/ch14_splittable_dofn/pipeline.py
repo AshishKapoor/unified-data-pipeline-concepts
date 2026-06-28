@@ -48,8 +48,8 @@ import sys
 import apache_beam as beam
 
 # OffsetRange is the canonical *restriction* type for "a half-open interval of positions" and
-# OffsetRangeTracker is its matching *restriction tracker* (implements try_claim / try_split).
-from apache_beam.io.restriction_trackers import OffsetRange, OffsetRangeTracker
+# OffsetRestrictionTracker is its matching *restriction tracker* (implements try_claim / try_split).
+from apache_beam.io.restriction_trackers import OffsetRange, OffsetRestrictionTracker
 
 # RestrictionProvider is the contract that tells Beam how to make/split/size a restriction for an
 # element. It is what turns an ordinary DoFn into a Splittable DoFn.
@@ -76,13 +76,13 @@ class RangeRestrictionProvider(RestrictionProvider):
         """
         return OffsetRange(0, element)
 
-    def create_tracker(self, restriction: OffsetRange) -> OffsetRangeTracker:
+    def create_tracker(self, restriction: OffsetRange) -> OffsetRestrictionTracker:
         """Wrap a restriction in a tracker that the process() body will claim positions against.
 
         The tracker is the *stateful* object: it remembers the last claimed position and enforces
         that claims only ever move forward and stay inside the (possibly already-split) range.
         """
-        return OffsetRangeTracker(restriction)
+        return OffsetRestrictionTracker(restriction)
 
     def restriction_size(self, element: int, restriction: OffsetRange) -> int:
         """How "big" is this restriction? Used by the runner to weigh splits / size bundles.
@@ -121,7 +121,7 @@ class CountingSource(beam.DoFn):
         self,
         element: int,
         # The presence of this RestrictionParam is what upgrades the DoFn to splittable. Beam injects
-        # an OffsetRangeTracker created by RangeRestrictionProvider.create_tracker().
+        # an OffsetRestrictionTracker created by RangeRestrictionProvider.create_tracker().
         restriction_tracker=beam.DoFn.RestrictionParam(RangeRestrictionProvider()),
     ):
         # current_restriction() is the sub-range THIS invocation owns (after any pre/dynamic splits).

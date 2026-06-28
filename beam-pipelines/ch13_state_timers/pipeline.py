@@ -79,6 +79,28 @@ SESSION_GAP_SEC = 8.0
 BURST_THRESHOLD = 4
 
 
+class SumInts(beam.CombineFn):
+    """A tiny integer-accumulator CombineFn for the counting state.
+
+    IMPORTANT: do NOT pass the builtin ``sum`` to CombiningValueStateSpec. A bare callable is wrapped
+    as a CallableWrapperCombineFn whose accumulator is a *list*, which then fails to encode against
+    the VarIntCoder ("an integer is required"). A real CombineFn whose accumulator is an int matches
+    the coder. (CombineFn internals are taught in Ch 6.)
+    """
+
+    def create_accumulator(self):
+        return 0
+
+    def add_input(self, acc, value):
+        return acc + value
+
+    def merge_accumulators(self, accs):
+        return sum(accs)
+
+    def extract_output(self, acc):
+        return acc
+
+
 class SessionizingDoFn(beam.DoFn):
     """Hand-rolled, per-user sessionization using raw State + Timers.
 
@@ -90,9 +112,9 @@ class SessionizingDoFn(beam.DoFn):
     # --- State cell declarations -------------------------------------------------------------
     # BagState: an append-only buffer of this user's raw events. We drain + clear it on flush.
     BUFFER = BagStateSpec("buffer", beam.coders.PickleCoder())
-    # CombiningState: a running count, folded through `sum`. Cheaper than len(list(bag)) because the
-    # runner keeps only the accumulator, not every element, in hot state.
-    COUNT = CombiningValueStateSpec("count", VarIntCoder(), sum)
+    # CombiningState: a running count folded through an int-accumulator CombineFn. Cheaper than
+    # len(list(bag)) because the runner keeps only the accumulator, not every element, in hot state.
+    COUNT = CombiningValueStateSpec("count", VarIntCoder(), SumInts())
     # ValueState (ReadModifyWrite): remembers the latest event-time we've seen for this user, so the
     # flushed summary can report the session's span.
     LAST_TS = ReadModifyWriteStateSpec("last_ts", FloatCoder())

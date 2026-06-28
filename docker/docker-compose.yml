@@ -14,6 +14,7 @@ services:
   jobmanager:
     image: flink:1.19
     command: jobmanager
+    restart: unless-stopped
     ports:
       # Host port is overridable (default 8081) for machines where 8081 is taken. Container port
       # stays 8081 so in-network refs (jobmanager:8081) and the docs' Flink link are unaffected.
@@ -24,6 +25,7 @@ services:
         jobmanager.rpc.address: jobmanager
         rest.address: jobmanager
         rest.bind-address: 0.0.0.0
+        jobmanager.memory.process.size: 1728m
         parallelism.default: 2
         state.backend.type: hashmap
         execution.checkpointing.interval: 10000
@@ -54,6 +56,10 @@ services:
         taskmanager.numberOfTaskSlots: 2
         taskmanager.bind-host: 0.0.0.0
         taskmanager.host: taskmanager
+        taskmanager.memory.process.size: 5120m
+        taskmanager.memory.task.off-heap.size: 1024m
+        taskmanager.memory.framework.off-heap.size: 512m
+        taskmanager.memory.managed.fraction: 0.2
         parallelism.default: 2
         state.backend.type: hashmap
         execution.checkpointing.dir: file:///tmp/flink-checkpoints
@@ -66,6 +72,7 @@ services:
   #    and submits it to the JobManager. Exposes JobService / Artifact / Expansion endpoints.
   beam-job-server:
     image: apache/beam_flink1.19_job_server:2.74.0
+    restart: unless-stopped
     command: >
       --flink-master=jobmanager:8081
       --job-host=0.0.0.0
@@ -150,11 +157,12 @@ services:
       - BEAM_ARTIFACT_ENDPOINT=beam-job-server:8098
       - BEAM_ENVIRONMENT_TYPE=EXTERNAL
       - BEAM_ENVIRONMENT_CONFIG=localhost:50000
-      # Ch 15 uses this in-network broker listener (NOT localhost:9092, which is host-only).
+      # Ch 15/16 use this in-network broker listener (NOT localhost:9092, which is host-only).
       - KAFKA_BOOTSTRAP=kafka:29092
-      # Cross-language KafkaIO (Ch 15/16): reuse the job server's Java expansion service on :8097.
-      # MUST be the in-network hostname — `localhost` here would resolve to the submitter itself.
-      - BEAM_EXPANSION_ENDPOINT=beam-job-server:8097
+      # Cross-language KafkaIO (Ch 15/16, opt-in) runs a LOCAL expansion service from a baked jar and
+      # stamps the Java transform with an EXTERNAL env pointing here. Only used when ENABLE_XLANG_KAFKA=1
+      # and a Java SDK worker pool is provided (advanced — see README).
+      - BEAM_JAVA_WORKER_POOL=beam-java-worker-pool:50000
     volumes:
       - ../beam-pipelines:/pipelines
       - beam-artifacts:/tmp/beam-artifact-staging

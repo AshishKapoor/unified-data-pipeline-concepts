@@ -68,3 +68,31 @@ def portable_options(
 def kafka_bootstrap() -> str:
     """In-network Kafka listener the SDK harnesses must use (NOT localhost:9092)."""
     return os.environ.get("KAFKA_BOOTSTRAP", "kafka:29092")
+
+
+def kafka_expansion_service():
+    """Build the cross-language expansion service for KafkaIO (Ch 15/16).
+
+    Why this shape (the cross-language-on-Flink recipe):
+      * The expansion *client* (this submitter) talks to the expansion service over a channel that
+        must be loopback/UDS — pointing it at a remote service (e.g. the job server's :8097) fails
+        with "Endpoint is neither UDS or TCP loopback address". So we run the expansion service as a
+        LOCAL subprocess here (BeamJarExpansionService) — loopback — using a jar baked into this image.
+      * The *expanded* KafkaIO is a Java transform; at runtime a Java SDK harness must execute it. We
+        tell the expansion service to stamp the transform with an EXTERNAL environment pointing at the
+        Java worker pool container (BEAM_JAVA_WORKER_POOL, default beam-java-worker-pool:50000), which
+        the Flink TaskManager connects to — mirroring how the Python pool runs Python DoFns.
+
+    Returns a BeamJarExpansionService, or None to fall back to Beam's default (Docker) environment.
+    """
+    from apache_beam.transforms.external import BeamJarExpansionService
+
+    jar = os.environ.get("KAFKA_EXPANSION_JAR", "/opt/expansion/kafka-io-expansion-service.jar")
+    java_pool = os.environ.get("BEAM_JAVA_WORKER_POOL", "beam-java-worker-pool:50000")
+    return BeamJarExpansionService(
+        jar,
+        append_args=[
+            f"--defaultEnvironmentType=EXTERNAL",
+            f"--defaultEnvironmentConfig={java_pool}",
+        ],
+    )

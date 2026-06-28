@@ -14,6 +14,16 @@ WORKDIR /pipelines
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+# Bake the KafkaIO cross-language expansion service jar (Ch 15/16) so the submitter can run it as a
+# LOCAL (loopback) expansion service — no runtime download, and it satisfies the expansion client's
+# loopback requirement. Pinned to the same Beam version (2.74.0) as everything else.
+ARG BEAM_VERSION=2.74.0
+RUN mkdir -p /opt/expansion \
+    && curl -fsSL \
+      "https://repo1.maven.org/maven2/org/apache/beam/beam-sdks-java-io-expansion-service/${BEAM_VERSION}/beam-sdks-java-io-expansion-service-${BEAM_VERSION}.jar" \
+      -o /opt/expansion/kafka-io-expansion-service.jar \
+    && test -s /opt/expansion/kafka-io-expansion-service.jar
+
 ENV PYTHONUNBUFFERED=1
 # Default to idle; the NestJS API runs `docker compose exec submitter python <pipeline>.py ...`.
 CMD ["tail", "-f", "/dev/null"]
