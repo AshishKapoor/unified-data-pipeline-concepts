@@ -15,7 +15,9 @@ services:
     image: flink:1.19
     command: jobmanager
     ports:
-      - "8081:8081" # Flink Web UI + REST API
+      # Host port is overridable (default 8081) for machines where 8081 is taken. Container port
+      # stays 8081 so in-network refs (jobmanager:8081) and the docs' Flink link are unaffected.
+      - "${FLINK_UI_PORT:-8081}:8081" # Flink Web UI + REST API
     environment:
       - |
         FLINK_PROPERTIES=
@@ -71,9 +73,11 @@ services:
       --artifact-port=8098
       --expansion-port=8097
     ports:
-      - "8099:8099" # JobService       -> --job_endpoint
-      - "8098:8098" # ArtifactStaging  -> --artifact_endpoint
-      - "8097:8097" # ExpansionService -> cross-language (Ch 15)
+      # Published only for the host submission lane / debugging; in-network the submitter reaches
+      # these at beam-job-server:8099/8098/8097 regardless of the host mapping.
+      - "${JOB_PORT:-8099}:8099"      # JobService       -> --job_endpoint
+      - "${ARTIFACT_PORT:-8098}:8098" # ArtifactStaging  -> --artifact_endpoint
+      - "${EXPANSION_PORT:-8097}:8097" # ExpansionService -> cross-language (Ch 15)
     depends_on:
       jobmanager:
         condition: service_healthy
@@ -99,7 +103,8 @@ services:
       context: ../nestjs-app
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      # Docs + API are same-origin (site.js uses relative /api paths), so remapping is fully safe.
+      - "${API_PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
