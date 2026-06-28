@@ -22,7 +22,6 @@ def portable_options(
     *,
     streaming: bool = False,
     parallelism: int = 2,
-    checkpointing_interval_ms: int = 10_000,
     extra: Optional[Iterable[str]] = None,
 ) -> PipelineOptions:
     """Return PipelineOptions wired to the portable Flink runner.
@@ -32,8 +31,11 @@ def portable_options(
             run can be correlated back to its Flink jobId.
         streaming: set True for unbounded pipelines (windowing/watermark/trigger chapters).
         parallelism: keep == taskmanager.numberOfTaskSlots (2 in this project).
-        checkpointing_interval_ms: surfaces checkpoints in the Flink UI (Ch 16 labs).
         extra: any additional ``--flag=value`` strings the chapter needs.
+
+    Note: checkpointing is configured at the *cluster* level via FLINK_PROPERTIES
+    (``execution.checkpointing.interval: 10000`` in docker-compose), not as a pipeline option — the
+    portable runner does not accept ``--checkpointing_interval`` and would warn that it is unparseable.
     """
     env_type = os.environ.get("BEAM_ENVIRONMENT_TYPE", "EXTERNAL")
 
@@ -45,7 +47,6 @@ def portable_options(
         f"--job_name={job_name}",
         f"--parallelism={parallelism}",
         "--save_main_session",
-        f"--checkpointing_interval={checkpointing_interval_ms}",
     ]
 
     # LOOPBACK runs the SDK harness inside the submitting process itself and needs no config; the

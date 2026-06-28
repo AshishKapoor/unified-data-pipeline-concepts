@@ -102,8 +102,8 @@ flink run -s s3://bucket/savepoints/savepoint-xxxx -p 4 job.jar   # restore at p
 
       <h2>Beam APIs introduced</h2>
       <ul>
-        <li><code>--checkpointing_interval</code> — how often barriers are injected (set inside
-          <code>portable_options</code>; smaller = less replay, more overhead).</li>
+        <li><code>execution.checkpointing.interval</code> — how often barriers are injected (set on the
+          cluster via <code>FLINK_PROPERTIES</code> to 10s; smaller = less replay, more overhead).</li>
         <li><code>portable_options(job_name, streaming=True)</code> — unbounded job, so checkpointing
           is active.</li>
         <li><code>ReadFromKafka</code> — a <em>replayable</em> source; offsets are committed with the

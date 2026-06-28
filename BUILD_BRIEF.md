@@ -57,7 +57,7 @@ Every pipeline submits with these flags (see `beam-pipelines/_common/options.py`
 | `--parallelism` | `2` | Matches `taskmanager.numberOfTaskSlots: 2`. |
 | `--job_name` | `<chapter>-<runId>` | Findable in Flink UI; set by the NestJS submitter. |
 | `--save_main_session` | flag | Pickles main-module globals (top-level DoFns). |
-| `--checkpointing_interval` | `10000` | Surfaces checkpoints in Ch 16 labs. |
+| checkpointing | cluster-level | Set via `FLINK_PROPERTIES execution.checkpointing.interval: 10000`, not a pipeline flag (the portable runner rejects `--checkpointing_interval`). |
 
 Local-dev lane (Ch 4): drop the worker pool, use `--environment_type=LOOPBACK` (no `--environment_config`).
 

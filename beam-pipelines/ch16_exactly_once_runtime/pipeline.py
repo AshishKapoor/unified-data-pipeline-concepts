@@ -22,8 +22,10 @@ Beam's role: a Beam *bundle* is the unit of commit. The portable Flink runner fi
 together with the surrounding checkpoint, so re-processing after a restart replays only the records
 since the last completed checkpoint — counted state is restored, not double-counted.
 
-  ``--checkpointing_interval`` (set inside ``portable_options``) controls how often barriers are
-  injected. Smaller = less replay on failure, more overhead.
+  The checkpoint interval is configured at the **cluster** level via Flink's
+  ``execution.checkpointing.interval: 10000`` (see ``FLINK_PROPERTIES`` in docker-compose) — barriers
+  are injected every ~10s. Smaller = less replay on failure, more overhead. (The portable runner does
+  not take a ``--checkpointing_interval`` pipeline flag, so we set it on the cluster instead.)
 
 Kill a TaskManager — what happens
 ---------------------------------
@@ -95,8 +97,8 @@ def run(argv=None) -> None:
 
     job_name = known.job_name or f"ch16-{known.run_id}"
 
-    # streaming=True makes this an unbounded job, so Flink's checkpointing is active and
-    # ``--checkpointing_interval`` (default 10_000 ms in portable_options) injects barriers.
+    # streaming=True makes this an unbounded job, so Flink's checkpointing is active; the cluster's
+    # execution.checkpointing.interval (10_000 ms, set via FLINK_PROPERTIES) injects barriers.
     # parallelism maps 1:1 to task slots; raising it from a savepoint is how you rescale the job.
     options = portable_options(
         job_name,

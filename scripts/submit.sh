@@ -49,7 +49,9 @@ fi
 REL="${DIR#beam-pipelines/}/pipeline.py"
 
 echo ">>> Submitting ${REL} (job_name=${TARGET}-${RUN_ID})"
+# ${arr[@]+"${arr[@]}"} expands safely to nothing when the array is empty, even under `set -u`
+# on macOS's bash 3.2 (a bare "${EXTRA_ARGS[@]}" would error "unbound variable").
 "${COMPOSE[@]}" exec -T submitter python "/pipelines/${REL}" \
   --run_id="${RUN_ID}" \
-  "${EXTRA_ARGS[@]}"
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 echo ">>> Done. Check the Flink UI: http://localhost:8081"

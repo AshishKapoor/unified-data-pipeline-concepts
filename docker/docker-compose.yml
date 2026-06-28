@@ -92,10 +92,16 @@ services:
     image: apache/beam_python3.11_sdk:2.74.0
     command: --worker_pool
     network_mode: "service:taskmanager"
+    # The SDK harness here is what actually RUNS user DoFns and file IO, so it needs the pipeline
+    # code on disk AND importable: file-reading chapters (ch01) read /pipelines/..., and the
+    # streaming chapters' DoFns live in the _common package (pickled by reference -> imported here).
+    environment:
+      - PYTHONPATH=/pipelines
     depends_on:
       - taskmanager
     volumes:
       - beam-artifacts:/tmp/beam-artifact-staging
+      - ../beam-pipelines:/pipelines:ro
 
   # 5) NestJS orchestration API (control plane). Serves the interactive docs + REST/SSE API.
   api:
