@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch 01 — The Unified Model · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="ch01">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="/docs/">all chapters</a>
+      <a href="/docs/chapters/ch02.html">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch 01 — The Unified Model: Why Beam Exists</h1>
+      <p class="concept-summary">
+        One pipeline definition, many runners. Batch is a bounded special case of streaming —
+        <strong>Beam = Batch + strEAM</strong>.
+      </p>
+
+      <h2>The problem Beam dissolves</h2>
+      <p>
+        Before Beam, teams maintained <em>two</em> codebases for the same logic: a batch job (for
+        historical, bounded data) and a streaming job (for live, unbounded data) — the classic
+        <strong>Lambda architecture</strong>. The two used different APIs, different engines, and
+        drifted apart over time.
+      </p>
+      <p>
+        Apache Beam's insight is that <strong>batch is just streaming over a bounded dataset</strong>.
+        Express your computation <em>once</em> against a single model, and a pluggable
+        <strong>runner</strong> translates it to a concrete engine: the local <code>DirectRunner</code>,
+        the <code>FlinkRunner</code>, Google Cloud <code>Dataflow</code>, <code>Spark</code>, and more.
+      </p>
+
+      <div class="callout">
+        <span class="ic">🎯</span>
+        <div>
+          <strong>The one idea for this chapter:</strong> the transform graph is independent of the
+          engine. In this course we run on Flink, but the <em>exact same Python</em> would run on
+          Dataflow by changing a single flag — <code>--runner</code>.
+        </div>
+      </div>
+
+      <h2>Beam APIs introduced</h2>
+      <ul>
+        <li><code>apache_beam.Pipeline</code> — the container you attach transforms to.</li>
+        <li><code>beam.io.ReadFromText</code> — a bounded source reading lines from files.</li>
+        <li><code>beam.FlatMap</code> — 1 input → N outputs (here: a line → its words).</li>
+        <li><code>combiners.Count.PerKey</code> — a built-in aggregation.</li>
+        <li><code>--runner</code> — the single flag that selects the execution engine.</li>
+      </ul>
+
+      <h2>The example pipeline</h2>
+      <p>Canonical WordCount. Read → tokenize → count → format → write — engine-agnostic:</p>
+      <pre><code class="language-python">with beam.Pipeline(options=options) as p:
+    counts = (
+        p
+        | "ReadLines"    >> beam.io.ReadFromText(known.input)
+        | "Tokenize"     >> beam.FlatMap(split_words)      # 1 line -> N words
+        | "PairWithOne"  >> beam.Map(lambda w: (w, 1))
+        | "CountPerWord" >> combiners.Count.PerKey()        # the aggregation
+        | "Format"       >> beam.MapTuple(lambda w, n: f"{w}: {n}")
+    )
+    counts | "WriteCounts" >> beam.io.WriteToText(known.output, file_name_suffix=".txt")</code></pre>
+      <p>
+        The submitter ships this graph to the Beam Flink Job Server, which turns it into a Flink
+        JobGraph and submits it to the JobManager. Open the Flink UI to watch the job execute.
+      </p>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="ch01">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+      <p style="color:var(--text-faint);font-size:.85rem">
+        The log above streams the submitter's output live over SSE. The word counts themselves are
+        written to <code>/tmp/beam-artifact-staging/ch01-wordcount*.txt</code> inside the cluster.
+      </p>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>One pipeline → many runners</h2>
+      <div class="diagram-card">
+        <pre class="mermaid">flowchart LR
+  P["Beam pipeline<br/>(Read → Count → Write)"] --> D["DirectRunner"]
+  P --> F["FlinkRunner"]
+  P --> G["Dataflow"]
+  P --> S["Spark"]
+  classDef active fill:#fde7df,stroke:#f26d21,stroke-width:2px;
+  class F active;</pre>
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note">click a chip to pin a runner</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/runners-fanout.js';
+    mount('#diagram');
+  </script>
+</body>
+</html>

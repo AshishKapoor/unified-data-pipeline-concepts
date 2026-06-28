@@ -1,0 +1,87 @@
+<!doctype html>
+<!--
+  CANONICAL CHAPTER TEMPLATE — copy to docs/chapters/chNN.html and fill the {{placeholders}}.
+  Two columns: prose (left) + sticky diagram/run pane (right). Vendored Mermaid + D3, no build step.
+  Placeholders:
+    {{NN}}            chapter number, e.g. 09
+    {{conceptId}}     e.g. ch09  (data-concept; drives the Run button)
+    {{title}}         chapter title
+    {{summary}}       one-line concept summary
+    {{prevHref}}/{{nextHref}}  chapter nav targets
+    {{diagram_title}} label above the diagram
+    {{anim_module}}   filename (no ext) under assets/js/d3-anim/ exporting mount()
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ch {{NN}} — {{title}} · unified-data-pipeline-concepts</title>
+  <link rel="stylesheet" href="/docs/assets/css/site.css" />
+</head>
+<body data-concept="{{conceptId}}">
+  <header class="site-header">
+    <a class="brand" href="/docs/"><span class="dot"></span> unified-data-pipeline-concepts</a>
+    <span class="spacer"></span>
+    <nav class="chapter-nav">
+      <a href="{{prevHref}}">← prev</a>
+      <a href="/docs/">all chapters</a>
+      <a href="{{nextHref}}">next →</a>
+    </nav>
+  </header>
+
+  <main class="chapter">
+    <section class="prose">
+      <h1>Ch {{NN}} — {{title}}</h1>
+      <p class="concept-summary">{{summary}}</p>
+
+      <h2>Concept</h2>
+      <p><!-- narrative --></p>
+
+      <h2>Beam APIs</h2>
+      <ul><!-- <li><code>api()</code> — what it does</li> --></ul>
+
+      <h2>The example pipeline</h2>
+      <p><!-- what the pipeline does --></p>
+      <pre><code class="language-python"><!-- excerpt --></code></pre>
+
+      <div class="run-panel">
+        <div class="run-row">
+          <button id="run-btn" class="run-btn" data-concept="{{conceptId}}">▶ Run on Flink</button>
+          <button id="cancel-btn" class="cancel-btn">Cancel</button>
+          <span id="run-status" class="badge" data-status="">idle</span>
+          <a id="flink-link" class="flink-link" href="http://localhost:8081" target="_blank"
+             rel="noopener" style="display:none">Open in Flink UI ↗</a>
+        </div>
+        <div id="run-log" class="sse-log" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <aside class="diagram-pane">
+      <h2>{{diagram_title}}</h2>
+      <div class="diagram-card">
+        <!-- Static architecture: Mermaid -->
+        <pre class="mermaid"><!-- mermaid source --></pre>
+        <!-- Time-driven animation: D3 mounts here -->
+        <div id="diagram" class="d3-anim"></div>
+        <div class="anim-controls">
+          <button data-act="play">▶ Play</button>
+          <button data-act="step">⏭ Step</button>
+          <button data-act="reset">⟲ Reset</button>
+          <span class="ctl-note"><!-- hint --></span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="site-footer">unified-data-pipeline-concepts · teaching material (MIT)</footer>
+
+  <script src="/docs/assets/vendor/d3.min.js"></script>
+  <script src="/docs/assets/vendor/mermaid.min.js"></script>
+  <script src="/docs/assets/js/mermaid-init.js"></script>
+  <script src="/docs/assets/js/site.js"></script>
+  <script type="module">
+    import { mount } from '/docs/assets/js/d3-anim/{{anim_module}}.js';
+    mount('#diagram', {});
+  </script>
+</body>
+</html>
