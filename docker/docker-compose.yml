@@ -141,6 +141,9 @@ services:
       - BEAM_ENVIRONMENT_CONFIG=localhost:50000
       # Ch 15 uses this in-network broker listener (NOT localhost:9092, which is host-only).
       - KAFKA_BOOTSTRAP=kafka:29092
+      # Cross-language KafkaIO (Ch 15/16): reuse the job server's Java expansion service on :8097.
+      # MUST be the in-network hostname — `localhost` here would resolve to the submitter itself.
+      - BEAM_EXPANSION_ENDPOINT=beam-job-server:8097
     volumes:
       - ../beam-pipelines:/pipelines
       - beam-artifacts:/tmp/beam-artifact-staging

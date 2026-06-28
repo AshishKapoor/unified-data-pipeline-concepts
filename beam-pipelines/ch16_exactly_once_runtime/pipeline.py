@@ -71,6 +71,10 @@ from apache_beam.io.kafka import ReadFromKafka, WriteToKafka
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _common.options import portable_options, kafka_bootstrap  # noqa: E402
 
+# Reuse the job server's Java expansion service for KafkaIO (same as Ch 15). In-network this is
+# beam-job-server:8097 (set by docker-compose); falls back to localhost:8097 for host-run.
+EXPANSION_SERVICE = os.environ.get("BEAM_EXPANSION_ENDPOINT", "localhost:8097")
+
 
 def to_count_record(user: str, total: int):
     """Format a per-user window count as Kafka (key, value) bytes for the output topic."""
@@ -129,6 +133,7 @@ def run(argv=None) -> None:
                 topics=[known.input_topic],
                 # Each Kafka record arrives as (key_bytes, value_bytes).
                 with_metadata=False,
+                expansion_service=EXPANSION_SERVICE,
             )
             # ---- key by user (the Kafka message key) -----------------------------------------
             | "KeyByUser"
@@ -148,6 +153,7 @@ def run(argv=None) -> None:
         _ = counts | "WriteCounts" >> WriteToKafka(
             producer_config={"bootstrap.servers": bootstrap},
             topic=known.output_topic,
+            expansion_service=EXPANSION_SERVICE,
         )
 
     logging.info(
